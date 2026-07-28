@@ -1,11 +1,28 @@
 import Foundation
 
 enum SubtitleExtractor {
+    // window.ytInitialPlayerResponse only reflects the video that was present in the initial
+    // HTML payload; YouTube is a single-page app, so navigating to another video in-page does
+    // not refresh that global. The in-page player instance's own getPlayerResponse() always
+    // reflects whatever is currently loaded, so prefer it and fall back for the very first load.
     static let captionTracksJS = """
     (function() {
-      var pr = window.ytInitialPlayerResponse;
-      if ((!pr || !pr.captions) && window.ytplayer && ytplayer.config && ytplayer.config.args && ytplayer.config.args.player_response) {
-        try { pr = JSON.parse(ytplayer.config.args.player_response); } catch (e) {}
+      function liveResponse() {
+        try {
+          var player = document.getElementById('movie_player');
+          if (player && typeof player.getPlayerResponse === 'function') {
+            var r = player.getPlayerResponse();
+            if (r && r.captions) return r;
+          }
+        } catch (e) {}
+        return null;
+      }
+      var pr = liveResponse();
+      if (!pr) {
+        pr = window.ytInitialPlayerResponse;
+        if ((!pr || !pr.captions) && window.ytplayer && ytplayer.config && ytplayer.config.args && ytplayer.config.args.player_response) {
+          try { pr = JSON.parse(ytplayer.config.args.player_response); } catch (e) {}
+        }
       }
       var tracks = pr && pr.captions && pr.captions.playerCaptionsTracklistRenderer && pr.captions.playerCaptionsTracklistRenderer.captionTracks;
       return tracks ? JSON.stringify(tracks) : "[]";

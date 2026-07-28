@@ -8,10 +8,13 @@ struct ContentView: View {
         VStack(spacing: 0) {
             addressBar
             Divider()
-            BrowserView(viewModel: viewModel)
-            if viewModel.showSubtitlePanel {
-                Divider()
-                subtitlePanel
+            ZStack(alignment: .bottom) {
+                BrowserView(viewModel: viewModel)
+                if viewModel.showSubtitlePanel {
+                    subtitleOverlay
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 14)
+                }
             }
         }
         .sheet(isPresented: $viewModel.showSettings) {
@@ -55,62 +58,79 @@ struct ContentView: View {
         .padding(.vertical, 6)
     }
 
-    private var subtitlePanel: some View {
-        VStack(spacing: 4) {
-            HStack {
-                if viewModel.isTranslating {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                }
-                Text(viewModel.statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer()
-                Button {
-                    viewModel.showSubtitleList = true
-                } label: {
-                    Image(systemName: "list.bullet")
-                }
-                .disabled(viewModel.subtitles.isEmpty)
-                Button {
-                    Task { await viewModel.translateAll() }
-                } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                }
-                .disabled(viewModel.subtitles.isEmpty || viewModel.isTranslating)
-                Button {
-                    viewModel.showSubtitlePanel = false
-                } label: {
-                    Image(systemName: "xmark")
-                }
-            }
-
+    /// Floating dual-line caption bubble over the video, in the style of bilingual subtitle
+    /// tools like Immersive Translate: original line on top (small, muted), translation below
+    /// (bold, prominent), rather than a status strip squeezed below the web view.
+    private var subtitleOverlay: some View {
+        VStack(spacing: 6) {
+            controlBar
             if let index = viewModel.currentIndex, viewModel.subtitles.indices.contains(index) {
-                let sub = viewModel.subtitles[index]
-                VStack(spacing: 2) {
-                    Text(sub.text)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                    if let translation = sub.translation, !translation.isEmpty {
-                        Text(translation)
-                            .font(.headline)
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
-            } else {
-                Text(viewModel.subtitles.isEmpty ? "打开 YouTube 视频页自动提取字幕" : "…")
+                captionBubble(for: viewModel.subtitles[index])
+            } else if viewModel.subtitles.isEmpty {
+                Text(viewModel.statusMessage.isEmpty ? "打开 YouTube 视频页自动提取双语字幕" : viewModel.statusMessage)
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.vertical, 4)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.55), in: Capsule())
             }
         }
+    }
+
+    private var controlBar: some View {
+        HStack(spacing: 10) {
+            if viewModel.isTranslating {
+                ProgressView()
+                    .scaleEffect(0.7)
+                    .tint(.white)
+            }
+            Text(viewModel.statusMessage)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button {
+                viewModel.showSubtitleList = true
+            } label: {
+                Image(systemName: "list.bullet")
+            }
+            .disabled(viewModel.subtitles.isEmpty)
+            Button {
+                Task { await viewModel.translateAll() }
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .disabled(viewModel.subtitles.isEmpty || viewModel.isTranslating)
+            Button {
+                viewModel.showSubtitlePanel = false
+            } label: {
+                Image(systemName: "xmark")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.white)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(.ultraThinMaterial)
+        .background(.black.opacity(0.45), in: Capsule())
+    }
+
+    private func captionBubble(for sub: Subtitle) -> some View {
+        VStack(spacing: 4) {
+            Text(sub.text)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.75))
+            if let translation = sub.translation, !translation.isEmpty {
+                Text(translation)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(maxWidth: 560)
+        .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
     }
 }
 

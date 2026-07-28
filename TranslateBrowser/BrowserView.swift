@@ -17,6 +17,7 @@ struct BrowserView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         viewModel.webView = webView
+        context.coordinator.observeURL(of: webView)
         if let url = URL(string: viewModel.urlText) {
             webView.load(URLRequest(url: url))
         }
@@ -27,14 +28,28 @@ struct BrowserView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         let viewModel: BrowserViewModel
+        private var urlObservation: NSKeyValueObservation?
 
         init(viewModel: BrowserViewModel) {
             self.viewModel = viewModel
         }
 
+        /// YouTube is a single-page app: navigating between videos happens via the History API
+        /// (no full page load), so WKNavigationDelegate.didFinish never fires again after the
+        /// first load. WKWebView.url is KVO-observable and does update on History API pushes,
+        /// so that's the reliable signal for "the user is now watching a different video."
+        func observeURL(of webView: WKWebView) {
+            urlObservation = webView.observe(\.url, options: [.new]) { [weak self] _, change in
+                guard let self, let url = change.newValue ?? nil else { return }
+                Task { @MainActor in
+                    self.viewModel.onURLChanged(url)
+                }
+            }
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             Task { @MainActor in
-                viewModel.onNavigationFinished(url: webView.url)
+                viewModel.onURLChanged(webView.url)
             }
         }
     }

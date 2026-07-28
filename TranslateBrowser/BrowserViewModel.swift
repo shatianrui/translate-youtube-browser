@@ -21,7 +21,8 @@ final class BrowserViewModel: ObservableObject {
 
     weak var webView: WKWebView?
     private var syncTimer: Timer?
-    private var lastLoadedVideoURL: String?
+    private var lastLoadedVideoID: String?
+    private var extractionTask: Task<Void, Never>?
 
     var provider: LLMProvider { LLMProvider(rawValue: providerRaw) ?? .openai }
 
@@ -36,32 +37,58 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
-    func onNavigationFinished(url: URL?) {
+    /// Called both on full page loads and on YouTube's in-page (SPA) navigations between videos.
+    func onURLChanged(_ url: URL?) {
         guard let url else { return }
         urlText = url.absoluteString
-        let isWatch = (url.host?.contains("youtube.com") == true) && url.absoluteString.contains("watch")
-        guard isWatch else {
-            if url.host?.contains("youtube.com") != true {
+        let isYouTube = url.host?.contains("youtube.com") == true
+        let isWatch = isYouTube && url.path.contains("/watch")
+        guard isWatch, let videoID = videoID(from: url) else {
+            if !isYouTube {
                 stopSync()
+                extractionTask?.cancel()
                 subtitles = []
+                currentIndex = nil
+                lastLoadedVideoID = nil
+                statusMessage = ""
             }
             return
         }
-        guard url.absoluteString != lastLoadedVideoURL else { return }
-        lastLoadedVideoURL = url.absoluteString
-        Task { await extractAndTranslate() }
+        guard videoID != lastLoadedVideoID else { return }
+        lastLoadedVideoID = videoID
+        extractionTask?.cancel()
+        extractionTask = Task { await extractAndTranslate() }
+    }
+
+    private func videoID(from url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "v" })?.value
     }
 
     private func extractAndTranslate() async {
         guard let webView else { return }
+        stopSync()
         statusMessage = "正在获取字幕…"
         subtitles = []
         currentIndex = nil
 
-        guard let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
-              let data = json.data(using: .utf8),
-              let tracks = try? JSONDecoder().decode([CaptionTrack].self, from: data),
-              !tracks.isEmpty else {
+        // Right after a YouTube SPA navigation, the player and its caption data can take a
+        // moment to become available, so poll briefly instead of failing on the first miss.
+        var tracks: [CaptionTrack] = []
+        for attempt in 0..<10 {
+            if Task.isCancelled { return }
+            if let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
+               let data = json.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode([CaptionTrack].self, from: data),
+               !decoded.isEmpty {
+                tracks = decoded
+                break
+            }
+            if attempt < 9 {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
+        }
+        guard !tracks.isEmpty else {
             statusMessage = "该视频没有可用字幕"
             return
         }
@@ -76,10 +103,12 @@ final class BrowserViewModel: ObservableObject {
                 statusMessage = "字幕内容为空"
                 return
             }
+            if Task.isCancelled { return }
             subtitles = subs
             startSync()
             await translateAll()
         } catch {
+            if Task.isCancelled { return }
             statusMessage = "字幕获取失败: \(error.localizedDescription)"
         }
     }
