@@ -2,6 +2,8 @@ name: Build IPA
 
 on:
   push:
+    branches: [ main, master, "cursor/**" ]
+  pull_request:
     branches: [ main, master ]
   workflow_dispatch:
 
@@ -37,6 +39,7 @@ jobs:
           cd $RUNNER_TEMP
           zip -r $GITHUB_WORKSPACE/TranslateBrowser.ipa Payload
           echo "IPA packaged"
+          ls -lh $GITHUB_WORKSPACE/TranslateBrowser.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
@@ -48,5 +51,5 @@ jobs:
       - name: Summary
         run: |
           echo "✅ IPA 构建完成！" >> $GITHUB_STEP_SUMMARY
-          echo "在 Artifacts 中下载 TranslateBrowser-IPA.zip，解压后得到 TranslateBrowser.ipa" >> $GITHUB_STEP_SUMMARY
+          echo "在 Artifacts 中下载 TranslateBrowser-IPA，解压后得到 TranslateBrowser.ipa" >> $GITHUB_STEP_SUMMARY
           echo "可用 AltStore / Sideloadly / TrollStore 侧载到 iPhone" >> $GITHUB_STEP_SUMMARY
