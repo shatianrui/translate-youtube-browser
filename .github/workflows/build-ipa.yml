@@ -1,0 +1,52 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+        working-directory: .
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild \
+            -project TranslateBrowser.xcodeproj \
+            -scheme TranslateBrowser \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath $RUNNER_TEMP/TranslateBrowser.xcarchive \
+            archive CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA (unsigned)
+        run: |
+          mkdir -p $RUNNER_TEMP/Payload
+          cp -R $RUNNER_TEMP/TranslateBrowser.xcarchive/Products/Applications/TranslateBrowser.app \
+             $RUNNER_TEMP/Payload/
+          cd $RUNNER_TEMP
+          zip -r $GITHUB_WORKSPACE/TranslateBrowser.ipa Payload
+          echo "IPA packaged"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TranslateBrowser-IPA
+          path: TranslateBrowser.ipa
+          retention-days: 14
+
+      - name: Summary
+        run: |
+          echo "✅ IPA 构建完成！" >> $GITHUB_STEP_SUMMARY
+          echo "在 Artifacts 中下载 TranslateBrowser-IPA.zip，解压后得到 TranslateBrowser.ipa" >> $GITHUB_STEP_SUMMARY
+          echo "可用 AltStore / Sideloadly / TrollStore 侧载到 iPhone" >> $GITHUB_STEP_SUMMARY
