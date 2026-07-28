@@ -3,15 +3,25 @@ import WebKit
 import Combine
 import SwiftUI
 
+/// One browser tab: its own WKWebView plus the YouTube subtitle-extraction/translation state for
+/// whatever page is currently loaded in it. Multiple tabs simply mean multiple `Tab` instances
+/// managed by `TabsManager`, each rendering its own `BrowserView`.
 @MainActor
-final class BrowserViewModel: ObservableObject {
-    @Published var urlText = "https://www.youtube.com"
+final class Tab: ObservableObject, Identifiable {
+    let id = UUID()
+    let isPrivate: Bool
+
+    @Published var urlText: String
+    @Published var pageTitle: String = ""
+    @Published var estimatedProgress: Double = 0
+    @Published var canGoBack = false
+    @Published var canGoForward = false
+
     @Published var subtitles: [Subtitle] = []
     @Published var currentIndex: Int?
     @Published var statusMessage = ""
     @Published var isTranslating = false
     @Published var showSubtitlePanel = true
-    @Published var showSettings = false
     @Published var showSubtitleList = false
 
     @AppStorage("provider") private var providerRaw = LLMProvider.openai.rawValue
@@ -20,10 +30,25 @@ final class BrowserViewModel: ObservableObject {
     @AppStorage("targetLang") private var targetLang = "中文"
 
     weak var webView: WKWebView?
+    /// Settings are app-wide, not per-tab; this lets translateAll() pop the shared settings
+    /// sheet when the API key is missing without Tab needing to own that state itself.
+    weak var tabsManager: TabsManager?
+
     private var lastLoadedVideoID: String?
     private var extractionTask: Task<Void, Never>?
 
+    init(urlText: String, isPrivate: Bool = false) {
+        self.urlText = urlText
+        self.isPrivate = isPrivate
+    }
+
     var provider: LLMProvider { LLMProvider(rawValue: providerRaw) ?? .openai }
+
+    /// A short label for the tab switcher: the page title if we have one, else the host.
+    var displayTitle: String {
+        if !pageTitle.isEmpty { return pageTitle }
+        return URL(string: urlText)?.host ?? urlText
+    }
 
     func loadFromAddressBar() {
         var text = urlText.trimmingCharacters(in: .whitespaces)
@@ -34,6 +59,11 @@ final class BrowserViewModel: ObservableObject {
         if let url = URL(string: text) {
             webView?.load(URLRequest(url: url))
         }
+    }
+
+    func load(_ urlString: String) {
+        urlText = urlString
+        loadFromAddressBar()
     }
 
     /// Called both on full page loads and on YouTube's in-page (SPA) navigations between videos.
@@ -147,7 +177,7 @@ final class BrowserViewModel: ObservableObject {
     func translateAll() async {
         guard !apiKey.isEmpty else {
             statusMessage = "请在设置中填写 \(provider.rawValue) 的 API Key"
-            showSettings = true
+            tabsManager?.showSettings = true
             return
         }
         let service = TranslationService(
@@ -179,4 +209,5 @@ final class BrowserViewModel: ObservableObject {
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
     func reload() { webView?.reload() }
+    func stopLoading() { webView?.stopLoading() }
 }
