@@ -8,12 +8,12 @@ struct ContentView: View {
         VStack(spacing: 0) {
             addressBar
             Divider()
-            ZStack(alignment: .bottom) {
+            ZStack(alignment: .topTrailing) {
                 BrowserView(viewModel: viewModel)
                 if viewModel.showSubtitlePanel {
-                    subtitleOverlay
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 14)
+                    controlBar
+                        .padding(.trailing, 12)
+                        .padding(.top, 10)
                 }
             }
         }
@@ -58,25 +58,10 @@ struct ContentView: View {
         .padding(.vertical, 6)
     }
 
-    /// Floating dual-line caption bubble over the video, in the style of bilingual subtitle
-    /// tools like Immersive Translate: original line on top (small, muted), translation below
-    /// (bold, prominent), rather than a status strip squeezed below the web view.
-    private var subtitleOverlay: some View {
-        VStack(spacing: 6) {
-            controlBar
-            if let index = viewModel.currentIndex, viewModel.subtitles.indices.contains(index) {
-                captionBubble(for: viewModel.subtitles[index])
-            } else if viewModel.subtitles.isEmpty {
-                Text(viewModel.statusMessage.isEmpty ? "打开 YouTube 视频页自动提取双语字幕" : viewModel.statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.55), in: Capsule())
-            }
-        }
-    }
-
+    /// Small floating status/controls pill. The bilingual caption text itself is rendered by
+    /// the injected page script directly inside the YouTube player's own DOM (see
+    /// SubtitleExtractor.bilingualOverlayJS), not here — that way it stays visible even when the
+    /// player goes fullscreen, which a SwiftUI overlay drawn on top of the WKWebView cannot do.
     private var controlBar: some View {
         HStack(spacing: 10) {
             if viewModel.isTranslating {
@@ -84,7 +69,7 @@ struct ContentView: View {
                     .scaleEffect(0.7)
                     .tint(.white)
             }
-            Text(viewModel.statusMessage)
+            Text(viewModel.statusMessage.isEmpty ? "打开 YouTube 视频页自动提取双语字幕" : viewModel.statusMessage)
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.85))
                 .lineLimit(1)
@@ -112,25 +97,6 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.black.opacity(0.45), in: Capsule())
-    }
-
-    private func captionBubble(for sub: Subtitle) -> some View {
-        VStack(spacing: 4) {
-            Text(sub.text)
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.75))
-            if let translation = sub.translation, !translation.isEmpty {
-                Text(translation)
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-        }
-        .multilineTextAlignment(.center)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .frame(maxWidth: 560)
-        .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
     }
 }
 
