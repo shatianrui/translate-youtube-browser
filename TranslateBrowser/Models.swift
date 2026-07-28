@@ -50,6 +50,18 @@ struct CaptionTrack: Decodable {
     let kind: String?
     let name: Name?
 
+    enum CodingKeys: String, CodingKey {
+        case baseUrl, languageCode, kind, name
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        baseUrl = try c.decode(String.self, forKey: .baseUrl)
+        languageCode = try c.decodeIfPresent(String.self, forKey: .languageCode) ?? ""
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        name = try c.decodeIfPresent(Name.self, forKey: .name)
+    }
+
     struct Name: Decodable {
         let simpleText: String?
         let runs: [Run]?

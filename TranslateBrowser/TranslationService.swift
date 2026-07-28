@@ -26,8 +26,23 @@ struct TranslationService {
 
         \(numbered)
         """
-        let reply = try await chat(prompt: prompt)
-        return Self.parseNumbered(reply, count: texts.count)
+        // One retry helps when the model occasionally returns a truncated / unnumbered reply.
+        var lastError: Error?
+        for attempt in 0..<2 {
+            do {
+                let reply = try await chat(prompt: prompt)
+                let parsed = Self.parseNumbered(reply, count: texts.count)
+                let nonEmpty = parsed.filter { !$0.isEmpty }.count
+                if nonEmpty >= max(1, texts.count / 2) || attempt == 1 {
+                    return parsed
+                }
+            } catch {
+                lastError = error
+                if attempt == 1 { throw error }
+            }
+        }
+        if let lastError { throw lastError }
+        return Array(repeating: "", count: texts.count)
     }
 
     private func chat(prompt: String) async throws -> String {

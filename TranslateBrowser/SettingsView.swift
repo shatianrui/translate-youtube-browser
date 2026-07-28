@@ -39,7 +39,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Text("API Key 仅保存在本机。打开 YouTube 视频页后会自动提取字幕并调用所选服务翻译。")
+                    Text("打开 YouTube 视频后会自动提取字幕，并在画面内叠加原文 + 译文双语字幕。API Key 仅保存在本机。若提示字幕为空，可点右上角刷新按钮重试。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
