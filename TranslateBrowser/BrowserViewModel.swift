@@ -49,7 +49,7 @@ final class BrowserViewModel: ObservableObject {
                 currentIndex = nil
                 lastLoadedVideoID = nil
                 statusMessage = ""
-                webView?.evaluateJavaScript("window.__tbClearSubtitles && window.__tbClearSubtitles()")
+                evalJS("window.__tbClearSubtitles && window.__tbClearSubtitles()")
             }
             return
         }
@@ -76,7 +76,7 @@ final class BrowserViewModel: ObservableObject {
         statusMessage = "正在获取字幕…"
         subtitles = []
         currentIndex = nil
-        webView.evaluateJavaScript("window.__tbClearSubtitles && window.__tbClearSubtitles()")
+        _ = try? await webView.evaluateJavaScript("window.__tbClearSubtitles && window.__tbClearSubtitles()")
 
         // Right after a YouTube SPA navigation, the player and its caption data can take a
         // moment to become available, so poll for a while instead of failing on the first miss.
@@ -111,7 +111,7 @@ final class BrowserViewModel: ObservableObject {
             }
             if Task.isCancelled { return }
             subtitles = subs
-            pushSubtitlesToPage()
+            await pushSubtitlesToPage()
             await translateAll()
         } catch {
             if Task.isCancelled { return }
@@ -130,11 +130,18 @@ final class BrowserViewModel: ObservableObject {
         let t: String
     }
 
-    private func pushSubtitlesToPage() {
+    private func pushSubtitlesToPage() async {
         guard let webView else { return }
         let payload = subtitles.map { PageSubtitle(s: $0.start, d: $0.duration, o: $0.text, t: $0.translation ?? "") }
         guard let data = try? JSONEncoder().encode(payload), let json = String(data: data, encoding: .utf8) else { return }
-        webView.evaluateJavaScript("window.__tbSetSubtitles && window.__tbSetSubtitles(\(json))")
+        _ = try? await webView.evaluateJavaScript("window.__tbSetSubtitles && window.__tbSetSubtitles(\(json))")
+    }
+
+    /// Fire-and-forget JS evaluation for call sites that aren't already `async` (evaluateJavaScript
+    /// only exists as an `async throws` API here, so a bare call must be wrapped in a Task).
+    private func evalJS(_ script: String) {
+        guard let webView else { return }
+        Task { _ = try? await webView.evaluateJavaScript(script) }
     }
 
     func translateAll() async {
@@ -160,7 +167,7 @@ final class BrowserViewModel: ObservableObject {
                     subtitles[i].translation = translated[i - start]
                 }
                 statusMessage = "已翻译 \(end)/\(subtitles.count)"
-                pushSubtitlesToPage()
+                await pushSubtitlesToPage()
             } catch {
                 statusMessage = "翻译失败: \(error.localizedDescription)"
                 return
