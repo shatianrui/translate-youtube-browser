@@ -1,6 +1,7 @@
 import Foundation
 import WebKit
 import Combine
+import SwiftUI
 
 @MainActor
 final class BrowserViewModel: ObservableObject {
