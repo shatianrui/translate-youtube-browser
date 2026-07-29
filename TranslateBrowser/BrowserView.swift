@@ -29,11 +29,6 @@ struct BrowserView: UIViewRepresentable {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        contentController.addUserScript(WKUserScript(
-            source: YouTubeAdBlock.skipAdsJS,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
-        ))
         config.userContentController = contentController
         // Prefer desktop layout so www.youtube.com shows quality menu (with Safari UA below).
         config.defaultWebpagePreferences.preferredContentMode = .desktop
@@ -55,10 +50,6 @@ struct BrowserView: UIViewRepresentable {
         refreshControl.addTarget(context.coordinator, action: #selector(Coordinator.handleRefresh), for: .valueChanged)
         webView.scrollView.refreshControl = refreshControl
         context.coordinator.refreshControl = refreshControl
-
-        Task { @MainActor in
-            await YouTubeAdBlock.installContentRules(into: webView.configuration.userContentController)
-        }
 
         let startURL = Self.normalizedYouTubeURL(from: tab.urlText).flatMap(URL.init(string:))
             ?? URL(string: tab.urlText)

@@ -85,6 +85,15 @@ enum SubtitleExtractor {
       }
       function captureTimedtext(url, body) {
         if (!isTimedtext(url)) return;
+        // Never keep ad-break caption payloads — they poison content A/V sync.
+        try {
+          var p = document.getElementById('movie_player')
+            || document.querySelector('.html5-video-player');
+          if (p && p.classList && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting'))) {
+            return;
+          }
+          if (document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay')) return;
+        } catch (e) {}
         if (!body || body.length < 20) return;
         // Ignore empty PoToken-blocked responses
         var trimmed = String(body).replace(/^\\s+/, '');

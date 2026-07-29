@@ -182,9 +182,28 @@ final class Tab: ObservableObject, Identifiable {
             window.__tbClearCaptionCapture && window.__tbClearCaptionCapture();
             """)
 
-        // Give the player a moment after SPA navigation, then try player-side capture first
-        // (YouTube's own timedtext request carries a valid PoToken — external fetches often don't).
-        try? await Task.sleep(nanoseconds: 800_000_000)
+        // Wait out pre-roll ads so we capture content timedtext, not ad captions.
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        if Task.isCancelled { return }
+        for _ in 0..<40 {
+            if Task.isCancelled { return }
+            let ad = try? await webView.evaluateJavaScript("""
+                (function() {
+                  var p = document.getElementById('movie_player')
+                    || document.querySelector('.html5-video-player');
+                  if (p && p.classList && (p.classList.contains('ad-showing')
+                      || p.classList.contains('ad-interrupting'))) return true;
+                  return !!document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay');
+                })()
+                """) as? Bool
+            if ad != true { break }
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        // Clear anything captured during the ad break.
+        pendingCapturedBody = nil
+        _ = try? await webView.evaluateJavaScript(
+            "window.__tbClearCaptionCapture && window.__tbClearCaptionCapture();"
+        )
         if Task.isCancelled { return }
 
         var tracks: [CaptionTrack] = []
