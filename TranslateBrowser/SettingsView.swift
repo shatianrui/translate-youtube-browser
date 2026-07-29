@@ -39,7 +39,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Text("打开 YouTube 视频后，双语字幕会自动出现在画面底部原 CC 位置（上方原文、下方译文），无需点开列表。若提示被拦截，点状态条上的刷新，或长按地址栏旁 Aa 可重新翻译。API Key 仅保存在本机。")
+                    Text("打开 YouTube 视频后，双语字幕会自动出现在画面底部原 CC 位置。翻译会优先当前播放位置并向前预翻译，快进后会立刻改跟新进度。API Key 仅保存在本机。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
