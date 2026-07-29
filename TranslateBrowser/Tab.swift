@@ -31,6 +31,8 @@ final class Tab: ObservableObject, Identifiable {
     private var lastLoadedVideoID: String?
     private var extractionTask: Task<Void, Never>?
     private var translationTask: Task<Void, Never>?
+    /// Soft retries when timedtext comes back empty after ads / player init races.
+    private var captionFetchRetries = 0
     /// Filled asynchronously when the page interceptor steals a player timedtext response.
     private var pendingCapturedBody: String?
     /// Bumped on seek / restart so in-flight chunk results can still apply, but the
@@ -100,6 +102,7 @@ final class Tab: ObservableObject, Identifiable {
         }
         guard videoID != lastLoadedVideoID else { return }
         lastLoadedVideoID = videoID
+        captionFetchRetries = 0
         extractionTask?.cancel()
         extractionTask = Task { await extractAndTranslate() }
     }
