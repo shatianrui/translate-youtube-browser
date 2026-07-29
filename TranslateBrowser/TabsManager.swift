@@ -33,7 +33,8 @@ final class TabsManager: ObservableObject {
 
     @discardableResult
     func newTab(urlString: String = TabsManager.defaultURL, isPrivate: Bool = false, makeActive: Bool = true) -> Tab {
-        let tab = Tab(urlText: urlString, isPrivate: isPrivate)
+        let normalized = BrowserView.normalizedYouTubeURL(from: urlString) ?? urlString
+        let tab = Tab(urlText: normalized, isPrivate: isPrivate)
         tab.tabsManager = self
         tabs.append(tab)
         tabChangeForwarders[tab.id] = tab.objectWillChange.sink { [weak self] _ in

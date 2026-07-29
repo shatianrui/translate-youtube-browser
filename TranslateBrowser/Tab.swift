@@ -58,6 +58,10 @@ final class Tab: ObservableObject, Identifiable {
         if !text.contains("://") {
             text = text.contains(".") ? "https://\(text)" : "https://www.google.com/search?q=\(text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text)"
         }
+        if let rewritten = BrowserView.normalizedYouTubeURL(from: text) {
+            text = rewritten
+            urlText = rewritten
+        }
         if let url = URL(string: text) {
             webView?.load(URLRequest(url: url))
         }
@@ -71,6 +75,14 @@ final class Tab: ObservableObject, Identifiable {
     /// Called on full loads and YouTube SPA navigations.
     func onURLChanged(_ url: URL?) {
         guard let url else { return }
+        // SPA may land on /shorts/ — rewrite to /watch for quality menu + caption APIs.
+        if let rewritten = BrowserView.normalizedYouTubeURL(from: url.absoluteString),
+           rewritten != url.absoluteString,
+           let newURL = URL(string: rewritten) {
+            urlText = rewritten
+            webView?.load(URLRequest(url: newURL))
+            return
+        }
         urlText = url.absoluteString
         let host = url.host?.lowercased() ?? ""
         let isYouTube = host.contains("youtube.com") || host.contains("youtu.be") || host.contains("youtube-nocookie.com")
@@ -157,7 +169,7 @@ final class Tab: ObservableObject, Identifiable {
     private func extractAndTranslate() async {
         guard let webView else { return }
         let videoID = lastLoadedVideoID
-        statusMessage = "正在获取字幕…"
+        statusMessage = ""
         subtitles = []
         currentIndex = nil
         pendingCapturedBody = nil
@@ -174,7 +186,6 @@ final class Tab: ObservableObject, Identifiable {
         try? await Task.sleep(nanoseconds: 800_000_000)
         if Task.isCancelled { return }
 
-        statusMessage = "正在唤醒播放器字幕…"
         var tracks: [CaptionTrack] = []
         for attempt in 0..<16 {
             if Task.isCancelled { return }
@@ -191,7 +202,6 @@ final class Tab: ObservableObject, Identifiable {
         }
 
         if tracks.isEmpty, let videoID {
-            statusMessage = "正在通过备用通道获取字幕轨…"
             tracks = (try? await SubtitleExtractor.fetchTracksViaAndroidVR(videoID: videoID)) ?? []
         }
 
@@ -199,12 +209,6 @@ final class Tab: ObservableObject, Identifiable {
         let track = tracks.isEmpty
             ? CaptionTrack(baseUrl: "", languageCode: "en", kind: nil, name: nil)
             : pickBestTrack(from: tracks)
-
-        if tracks.isEmpty {
-            statusMessage = "正在拦截播放器字幕请求…"
-        } else {
-            statusMessage = "正在下载字幕（\(track.languageCode)）…"
-        }
 
         do {
             // Prefer any body already stolen by the network hooks while we were polling.
@@ -227,8 +231,7 @@ final class Tab: ObservableObject, Identifiable {
             }
             if Task.isCancelled { return }
             subtitles = subs
-            // Timeline is ready — show originals immediately, then realtime-translate the playhead.
-            statusMessage = "时间轴已就绪，实时翻译中…"
+            statusMessage = ""
             await pushSubtitlesToPage()
             startRealtimeTranslation()
         } catch {
@@ -423,7 +426,6 @@ final class Tab: ObservableObject, Identifiable {
             // 1) Realtime — current (and immediate next) cue first.
             if let indices = realtimeChunk(center: center) {
                 isTranslating = true
-                statusMessage = "实时翻译"
                 let ok = await translateIndices(indices, service: service, epoch: epoch)
                 if !ok { return }
                 continue
@@ -436,9 +438,8 @@ final class Tab: ObservableObject, Identifiable {
                 maxCount: prefetchBatch,
                 cueWindow: prefetchCues,
                 secondsWindow: prefetchSeconds
-            ), let first = indices.first, let last = indices.last {
+            ) {
                 isTranslating = true
-                statusMessage = "预翻译 \(first + 1)–\(last + 1)"
                 let ok = await translateIndices(indices, service: service, epoch: epoch)
                 if !ok { return }
                 continue
@@ -446,9 +447,6 @@ final class Tab: ObservableObject, Identifiable {
 
             // 3) Window satisfied — idle briefly; playhead advance / seek wakes more work.
             isTranslating = false
-            if statusMessage.hasPrefix("实时") || statusMessage.hasPrefix("预翻译") || statusMessage.contains("时间轴") {
-                statusMessage = ""
-            }
             try? await Task.sleep(nanoseconds: 350_000_000)
         }
 

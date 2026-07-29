@@ -96,32 +96,24 @@ struct ContentView: View {
     }
 
     private func subtitleHUD(for tab: Tab) -> some View {
-        // Tiny non-blocking status only — captions themselves render ON the video.
-        // Never require opening a list sheet to watch bilingual captions.
-        let showChip = tab.isTranslating
-            || tab.statusMessage.hasPrefix("实时")
-            || tab.statusMessage.hasPrefix("预翻译")
-            || tab.statusMessage.contains("时间轴")
-            || tab.statusMessage.contains("拦截")
-            || tab.statusMessage.contains("失败")
-            || tab.statusMessage.contains("获取")
-            || tab.statusMessage.contains("下载")
-            || tab.statusMessage.contains("通道")
-            || tab.statusMessage.contains("就绪")
+        // Quiet by default — only surface failures / blocks (with original meaning).
+        let msg = tab.statusMessage
+        let showChip = !msg.isEmpty && (
+            msg.contains("拦截")
+            || msg.contains("失败")
+            || msg.contains("无法")
+            || msg.contains("错误")
+            || msg.contains("API Key")
+        )
 
         return Group {
             if showChip {
                 HStack(spacing: 8) {
-                    if tab.isTranslating {
-                        ProgressView()
-                            .scaleEffect(0.65)
-                            .tint(.white)
-                    }
-                    Text(tab.statusMessage.isEmpty ? "处理字幕中…" : tab.statusMessage)
+                    Text(msg)
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(1)
-                    if tab.statusMessage.contains("拦截") || tab.statusMessage.contains("失败") {
+                        .lineLimit(2)
+                    if msg.contains("拦截") || msg.contains("失败") {
                         Button { tab.reload() } label: {
                             Image(systemName: "arrow.clockwise")
                         }
@@ -131,11 +123,13 @@ struct ContentView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(Color.black.opacity(0.4), in: Capsule())
+                .background(Color.black.opacity(0.55), in: Capsule())
                 .frame(maxWidth: .infinity, alignment: .trailing)
-                .allowsHitTesting(tab.statusMessage.contains("拦截") || tab.statusMessage.contains("失败"))
+                .allowsHitTesting(true)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: tab.statusMessage)
     }
 
     // MARK: - Safari bottom chrome

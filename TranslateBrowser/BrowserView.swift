@@ -12,13 +12,9 @@ struct BrowserView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        // Critical: keep <video> inside the WKWebView instead of handing off to the native
-        // iOS fullscreen / AVKit controller (the "弹出播放窗口" behavior).
         config.allowsInlineMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = false
         config.mediaTypesRequiringUserActionForPlayback = []
-        // Prefer the standards Fullscreen API on a DOM element (our caption overlay lives
-        // inside the player) over the legacy media fullscreen presentation.
         config.preferences.isElementFullscreenEnabled = true
         if tab.isPrivate {
             config.websiteDataStore = .nonPersistent()
@@ -33,11 +29,16 @@ struct BrowserView: UIViewRepresentable {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        contentController.addUserScript(WKUserScript(
+            source: YouTubeAdBlock.skipAdsJS,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
         config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        // Desktop Safari UA so YouTube serves the full player (better caption / fullscreen APIs).
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+        // Desktop Chrome UA: full quality menu + classic watch player (better than mobile Shorts shell).
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
@@ -52,13 +53,58 @@ struct BrowserView: UIViewRepresentable {
         webView.scrollView.refreshControl = refreshControl
         context.coordinator.refreshControl = refreshControl
 
-        if let url = URL(string: tab.urlText) {
-            webView.load(URLRequest(url: url))
+        Task { @MainActor in
+            await YouTubeAdBlock.installContentRules(into: webView.configuration.userContentController)
+        }
+
+        let startURL = Self.normalizedYouTubeURL(from: tab.urlText).flatMap(URL.init(string:))
+            ?? URL(string: tab.urlText)
+        if let startURL {
+            webView.load(URLRequest(url: startURL))
         }
         return webView
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    /// m.youtube → www; /shorts/ID → /watch?v=ID (full player: quality + captions).
+    static func normalizedYouTubeURL(from raw: String) -> String? {
+        guard let url = URL(string: raw), var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        let host = (comps.host ?? "").lowercased()
+        guard host.contains("youtube.com") || host.contains("youtu.be") || host.contains("youtube-nocookie.com") else {
+            return nil
+        }
+
+        var changed = false
+        if host.hasPrefix("m.") || host == "m.youtube.com" || host == "mobile.youtube.com" {
+            comps.host = "www.youtube.com"
+            changed = true
+        }
+        if host.contains("youtu.be") {
+            let id = url.path.split(separator: "/").first.map(String.init)
+            if let id, !id.isEmpty {
+                comps.scheme = "https"
+                comps.host = "www.youtube.com"
+                comps.path = "/watch"
+                comps.queryItems = [URLQueryItem(name: "v", value: id)]
+                return comps.url?.absoluteString
+            }
+        }
+
+        let parts = comps.path.split(separator: "/").map(String.init)
+        if parts.count >= 2, parts[0] == "shorts" {
+            let id = parts[1].split(separator: "?").first.map(String.init) ?? parts[1]
+            comps.scheme = comps.scheme ?? "https"
+            comps.host = "www.youtube.com"
+            comps.path = "/watch"
+            comps.queryItems = [URLQueryItem(name: "v", value: id)]
+            changed = true
+        }
+
+        return changed ? comps.url?.absoluteString : nil
+    }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let tab: Tab
@@ -96,6 +142,22 @@ struct BrowserView: UIViewRepresentable {
             ]
         }
 
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            if let url = navigationAction.request.url,
+               let rewritten = BrowserView.normalizedYouTubeURL(from: url.absoluteString),
+               rewritten != url.absoluteString,
+               let newURL = URL(string: rewritten) {
+                decisionHandler(.cancel)
+                webView.load(URLRequest(url: newURL))
+                return
+            }
+            decisionHandler(.allow)
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             Task { @MainActor in
                 tab.onURLChanged(webView.url)
@@ -124,7 +186,6 @@ struct BrowserView: UIViewRepresentable {
                 guard let index = message.body as? Int else { return }
                 Task { @MainActor in tab.onActiveIndexChanged(index) }
             case "tbCaptionBody":
-                // Passive capture while the player loads CC — stash for the extraction task.
                 if let dict = message.body as? [String: Any],
                    let body = dict["body"] as? String, body.count > 20 {
                     Task { @MainActor in tab.onCapturedCaptionBody(body) }

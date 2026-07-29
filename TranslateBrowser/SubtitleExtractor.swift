@@ -16,7 +16,7 @@ enum SubtitleExtractor {
         return null;
       }
       function liveResponse() {
-        var ids = ['movie_player', 'ytd-player', 'player'];
+        var ids = ['movie_player', 'shorts-player', 'ytd-player', 'player'];
         for (var i = 0; i < ids.length; i++) {
           var el = document.getElementById(ids[i]);
           var r = fromPlayer(el);
@@ -27,6 +27,9 @@ enum SubtitleExtractor {
             if (r) return r;
           }
         }
+        var activeReel = document.querySelector('ytd-reel-video-renderer[is-active] #player, ytd-reel-video-renderer[is-active] .html5-video-player');
+        var rActive = fromPlayer(activeReel);
+        if (rActive) return rActive;
         var players = document.querySelectorAll('.html5-video-player');
         for (var j = 0; j < players.length; j++) {
           var pr = fromPlayer(players[j]);
@@ -127,6 +130,8 @@ enum SubtitleExtractor {
 
       function findPlayer() {
         return document.getElementById('movie_player')
+          || document.getElementById('shorts-player')
+          || document.querySelector('ytd-reel-video-renderer[is-active] .html5-video-player')
           || document.querySelector('.html5-video-player')
           || document.querySelector('#player');
       }
@@ -275,6 +280,8 @@ enum SubtitleExtractor {
 
       function findPlayerContainer() {
         return document.getElementById('movie_player')
+          || document.getElementById('shorts-player')
+          || document.querySelector('ytd-reel-video-renderer[is-active] #player')
           || document.querySelector('.html5-video-player')
           || document.querySelector('#player')
           || document.querySelector('ytd-player');
