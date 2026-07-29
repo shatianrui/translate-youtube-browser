@@ -278,15 +278,31 @@ final class Tab: ObservableObject, Identifiable {
 
     private struct PageSubtitle: Encodable {
         let s: Double
-        let d: Double
+        /// Exclusive end time, clipped to the next cue's start so display matches
+        /// YouTube's original caption windows (no linger into the following line).
+        let e: Double
         let o: String
         let t: String
     }
 
     private func pushSubtitlesToPage() async {
         guard let webView else { return }
-        let payload = subtitles.map {
-            PageSubtitle(s: $0.start, d: $0.duration, o: $0.text, t: $0.translation ?? "")
+        let payload: [PageSubtitle] = subtitles.indices.map { i in
+            let sub = subtitles[i]
+            let rawEnd = sub.start + max(sub.duration, 0.05)
+            let end: Double
+            if i + 1 < subtitles.count {
+                // YouTube never keeps the previous line up once the next cue starts.
+                end = min(rawEnd, subtitles[i + 1].start)
+            } else {
+                end = rawEnd
+            }
+            return PageSubtitle(
+                s: sub.start,
+                e: max(end, sub.start + 0.05),
+                o: sub.text,
+                t: sub.translation ?? ""
+            )
         }
         guard let data = try? JSONEncoder().encode(payload),
               let json = String(data: data, encoding: .utf8) else { return }

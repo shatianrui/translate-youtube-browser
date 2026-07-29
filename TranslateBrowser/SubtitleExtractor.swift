@@ -395,24 +395,32 @@ enum SubtitleExtractor {
         container.appendChild(win);
         return win;
       }
+      // Strict timing: show cue only while playhead is inside the original window
+      // [s, e). No sticky linger — that was causing A/V desync after seeks / gaps.
       function findCue(t) {
         var subs = window.__tbSubs;
-        var best = -1;
-        for (var i = 0; i < subs.length; i++) {
-          var s = subs[i];
-          var end = s.s + Math.max(s.d || 0, 0.05);
-          if (t >= s.s && t <= end + 0.15) return i;
-          if (t >= s.s) best = i;
-          if (s.s > t) break;
+        if (!subs || !subs.length) return -1;
+        var lo = 0, hi = subs.length - 1, cand = -1;
+        while (lo <= hi) {
+          var mid = (lo + hi) >> 1;
+          if (subs[mid].s <= t) { cand = mid; lo = mid + 1; }
+          else hi = mid - 1;
         }
-        if (best >= 0) {
-          var b = subs[best];
-          var bEnd = b.s + Math.max(b.d || 0, 0.8);
-          if (t <= bEnd + 0.35) return best;
-        }
+        if (cand < 0) return -1;
+        var cue = subs[cand];
+        var end = (typeof cue.e === 'number' && cue.e > cue.s)
+          ? cue.e
+          : (cue.s + Math.max(cue.d || 0, 0.05));
+        if (t >= cue.s && t < end) return cand;
         return -1;
       }
       var lastIndex = -2;
+      var lastSig = '';
+      function cueSignature(idx) {
+        if (idx < 0 || !window.__tbSubs[idx]) return '';
+        var s = window.__tbSubs[idx];
+        return idx + '|' + (s.o || '') + '|' + (s.t || '');
+      }
       function renderCue(idx) {
         var win = ensureOverlay();
         if (!win) return;
@@ -444,9 +452,12 @@ enum SubtitleExtractor {
         var video = findVideo(host);
         ensureOverlay();
         if (!video) return;
-        var idx = window.__tbSubs.length ? findCue(video.currentTime) : -1;
-        if (idx === lastIndex) return;
+        var t = video.currentTime;
+        var idx = window.__tbSubs.length ? findCue(t) : -1;
+        var sig = cueSignature(idx);
+        if (idx === lastIndex && sig === lastSig) return;
         lastIndex = idx;
+        lastSig = sig;
         renderCue(idx);
         post('tbActiveIndex', idx);
       }
@@ -454,20 +465,40 @@ enum SubtitleExtractor {
         if (e.target && e.target.tagName === 'VIDEO') tick();
       }, true);
       document.addEventListener('seeked', function(e) {
-        if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; tick(); }
+        if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; lastSig = ''; tick(); }
       }, true);
-      document.addEventListener('fullscreenchange', function() { lastIndex = -2; tick(); });
-      document.addEventListener('webkitfullscreenchange', function() { lastIndex = -2; tick(); });
-      setInterval(tick, 200);
+      document.addEventListener('seeking', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; lastSig = ''; tick(); }
+      }, true);
+      document.addEventListener('fullscreenchange', function() { lastIndex = -2; lastSig = ''; tick(); });
+      document.addEventListener('webkitfullscreenchange', function() { lastIndex = -2; lastSig = ''; tick(); });
+      // rAF keeps bilingual lines locked to the video clock more tightly than 200ms polling.
+      (function rafLoop() {
+        try { tick(); } catch (e) {}
+        requestAnimationFrame(rafLoop);
+      })();
 
       window.__tbSetSubtitles = function(subs) {
-        window.__tbSubs = Array.isArray(subs) ? subs : [];
+        var list = Array.isArray(subs) ? subs : [];
+        // Normalize end times client-side too (clip to next start) in case an older
+        // payload still sends only {s,d}.
+        for (var i = 0; i < list.length; i++) {
+          var cue = list[i];
+          if (typeof cue.e !== 'number' || !(cue.e > cue.s)) {
+            var rawEnd = cue.s + Math.max(cue.d || 0, 0.05);
+            var nextStart = (i + 1 < list.length) ? list[i + 1].s : rawEnd;
+            cue.e = Math.min(rawEnd, nextStart);
+          }
+        }
+        window.__tbSubs = list;
         lastIndex = -2;
+        lastSig = '';
         tick();
       };
       window.__tbClearSubtitles = function() {
         window.__tbSubs = [];
         lastIndex = -2;
+        lastSig = '';
         renderCue(-1);
       };
     })();
