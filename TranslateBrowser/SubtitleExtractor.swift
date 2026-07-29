@@ -41,37 +41,22 @@ enum SubtitleExtractor {
           try { pr = JSON.parse(ytplayer.config.args.player_response); } catch (e) {}
         }
       }
-      if ((!pr || !pr.captions) && window.ytInitialData) {
-        try {
-          var contents = (ytInitialData.contents && ytInitialData.contents.twoColumnWatchNextResults) || null;
-        } catch (e) {}
-      }
       var tracks = pr && pr.captions && pr.captions.playerCaptionsTracklistRenderer && pr.captions.playerCaptionsTracklistRenderer.captionTracks;
       return tracks ? JSON.stringify(tracks) : "[]";
     })()
     """
 
-    /// Body of `callAsyncJavaScript` — must `return` (not rely on evaluateJavaScript, which
-    /// does not await Promises). `url` is passed via the arguments dictionary.
-    static let fetchBodyAsyncJS = """
-    try {
-      const res = await fetch(url, { credentials: 'include', cache: 'no-store' });
-      if (!res.ok) return JSON.stringify({ ok: false, status: res.status, body: '' });
-      const body = await res.text();
-      return JSON.stringify({ ok: true, status: res.status, body: body });
-    } catch (e) {
-      return JSON.stringify({ ok: false, status: -1, body: String(e) });
-    }
-    """
-
-    /// Injected once per page load. Renders bilingual captions inside the YouTube player DOM
-    /// (so they survive fullscreen), redirects webkitEnterFullscreen to Element.requestFullscreen,
-    /// and reports SPA navigations back to Swift.
+    /// Injected at document-start. Hooks fetch/XHR to capture the player's own timedtext
+    /// responses (which already carry a valid PoToken), renders bilingual overlay inside the
+    /// player DOM, and reports SPA navigations back to Swift.
     static let bilingualOverlayJS = """
     (function() {
       if (window.__tbInstalled) return;
       window.__tbInstalled = true;
       window.__tbSubs = [];
+      window.__tbCapturedBody = null;
+      window.__tbCapturedURL = null;
+      window.__tbCaptionWaiters = [];
 
       function post(name, payload) {
         try { window.webkit.messageHandlers[name].postMessage(payload); } catch (e) {}
@@ -88,6 +73,155 @@ enum SubtitleExtractor {
       var _rs = history.replaceState;
       history.replaceState = function() { var r = _rs.apply(this, arguments); setTimeout(notifyURL, 0); return r; };
 
+      function isTimedtext(url) {
+        return url && String(url).indexOf('/api/timedtext') !== -1;
+      }
+      function captureTimedtext(url, body) {
+        if (!isTimedtext(url)) return;
+        if (!body || body.length < 20) return;
+        // Ignore empty PoToken-blocked responses
+        var trimmed = String(body).replace(/^\\s+/, '');
+        if (!trimmed || trimmed === '{}' || trimmed === '[]') return;
+        window.__tbCapturedURL = String(url);
+        window.__tbCapturedBody = String(body);
+        post('tbCaptionBody', { url: String(url), body: String(body) });
+        var waiters = window.__tbCaptionWaiters.splice(0);
+        waiters.forEach(function(cb) { try { cb(String(body), String(url)); } catch (e) {} });
+      }
+
+      // --- Network hooks: steal the player's own pot-bearing timedtext responses ---
+      try {
+        var nativeFetch = window.fetch;
+        window.fetch = function() {
+          var args = arguments;
+          var input = args[0];
+          var url = (typeof input === 'string') ? input : (input && input.url);
+          return nativeFetch.apply(this, args).then(function(res) {
+            try {
+              if (isTimedtext(url)) {
+                res.clone().text().then(function(t) { captureTimedtext(url, t); }).catch(function(){});
+              }
+            } catch (e) {}
+            return res;
+          });
+        };
+      } catch (e) {}
+
+      try {
+        var xo = XMLHttpRequest.prototype.open;
+        var xs = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          this.__tbURL = url;
+          return xo.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function() {
+          var xhr = this;
+          if (isTimedtext(xhr.__tbURL)) {
+            xhr.addEventListener('load', function() {
+              try { captureTimedtext(xhr.__tbURL, xhr.responseText); } catch (e) {}
+            });
+          }
+          return xs.apply(this, arguments);
+        };
+      } catch (e) {}
+
+      function findPlayer() {
+        return document.getElementById('movie_player')
+          || document.querySelector('.html5-video-player')
+          || document.querySelector('#player');
+      }
+
+      function preferredTrack(tracks, preferLang) {
+        if (!tracks || !tracks.length) return null;
+        var lang = preferLang || 'en';
+        for (var i = 0; i < tracks.length; i++) {
+          var t = tracks[i];
+          if (t.kind !== 'asr' && t.languageCode && t.languageCode.indexOf(lang) === 0) return t;
+        }
+        for (var j = 0; j < tracks.length; j++) {
+          if (tracks[j].kind !== 'asr') return tracks[j];
+        }
+        return tracks[0];
+      }
+
+      function enableNativeCaptions(preferLang) {
+        var player = findPlayer();
+        if (!player) return false;
+        try { if (player.loadModule) player.loadModule('captions'); } catch (e) {}
+        var tracks = [];
+        try {
+          var pr = player.getPlayerResponse && player.getPlayerResponse();
+          tracks = (pr && pr.captions && pr.captions.playerCaptionsTracklistRenderer
+            && pr.captions.playerCaptionsTracklistRenderer.captionTracks) || [];
+        } catch (e) {}
+        var track = preferredTrack(tracks, preferLang);
+        try {
+          if (track && player.setOption) {
+            player.setOption('captions', 'track', {
+              languageCode: track.languageCode,
+              languageName: (track.name && (track.name.simpleText || '')) || '',
+              kind: track.kind || ''
+            });
+          } else if (player.toggleSubtitlesOn) {
+            player.toggleSubtitlesOn();
+          }
+        } catch (e) {}
+        try {
+          var btn = document.querySelector('.ytp-subtitles-button, button[aria-label*="ubtitles"], button[aria-label*="字幕"]');
+          if (btn && btn.getAttribute('aria-pressed') !== 'true') btn.click();
+        } catch (e) {}
+        return !!track || !!player;
+      }
+
+      // Ask the player to load captions so its own request (with pot) hits our hooks.
+      // Then optionally re-fetch the captured URL as json3 for a clean parse.
+      window.__tbRequestCaptions = async function(preferLang) {
+        if (window.__tbCapturedBody && window.__tbCapturedBody.length > 20) {
+          return JSON.stringify({ ok: true, body: window.__tbCapturedBody, url: window.__tbCapturedURL || '' });
+        }
+        enableNativeCaptions(preferLang || 'en');
+
+        var body = await new Promise(function(resolve) {
+          if (window.__tbCapturedBody) { resolve(window.__tbCapturedBody); return; }
+          var settled = false;
+          var timer = setTimeout(function() {
+            if (!settled) { settled = true; resolve(window.__tbCapturedBody); }
+          }, 9000);
+          window.__tbCaptionWaiters.push(function(b) {
+            if (!settled) { settled = true; clearTimeout(timer); resolve(b); }
+          });
+          // Nudge again a couple times — player module can lag after SPA nav
+          setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 1200);
+          setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 2800);
+        });
+
+        if (!body) return JSON.stringify({ ok: false, body: '', url: window.__tbCapturedURL || '' });
+
+        // Prefer json3 for reliable parsing
+        var url = window.__tbCapturedURL || '';
+        if (url) {
+          try {
+            var u = new URL(url, location.origin);
+            u.searchParams.set('fmt', 'json3');
+            var res = await fetch(u.toString(), { credentials: 'include', cache: 'no-store' });
+            if (res.ok) {
+              var text = await res.text();
+              if (text && text.length > 20) {
+                window.__tbCapturedBody = text;
+                body = text;
+              }
+            }
+          } catch (e) {}
+        }
+        return JSON.stringify({ ok: true, body: body, url: url });
+      };
+
+      window.__tbClearCaptionCapture = function() {
+        window.__tbCapturedBody = null;
+        window.__tbCapturedURL = null;
+      };
+
+      // --- Bilingual overlay inside the player ---
       var style = document.createElement('style');
       style.textContent = [
         '.ytp-caption-window-container{display:none !important;}',
@@ -135,8 +269,6 @@ enum SubtitleExtractor {
       }
       function findCue(t) {
         var subs = window.__tbSubs;
-        // Binary-ish linear scan is fine for typical caption counts; prefer exact window, then
-        // fall back to the nearest previous cue if gaps between cues are large.
         var best = -1;
         for (var i = 0; i < subs.length; i++) {
           var s = subs[i];
@@ -214,47 +346,78 @@ enum SubtitleExtractor {
     })();
     """
 
-    struct FetchResult: Decodable {
+    /// Body for callAsyncJavaScript — awaits the page-side caption capture (with PoToken).
+    static let requestCaptionsAsyncJS = """
+    if (typeof window.__tbRequestCaptions !== 'function') {
+      return JSON.stringify({ ok: false, body: '', url: '', error: 'not_installed' });
+    }
+    return await window.__tbRequestCaptions(preferLang || 'en');
+    """
+
+    struct CaptureResult: Decodable {
         let ok: Bool
-        let status: Int
         let body: String
+        let url: String?
+        let error: String?
     }
 
-    /// Multi-strategy caption download.
-    /// YouTube's WEB caption `baseUrl` often includes `exp=xpe`, which requires a BotGuard
-    /// PoToken — without it timedtext returns HTTP 200 with an empty body. Strategies:
-    ///  1. Try the page track URL via in-page `fetch` (cookies) and URLSession.
-    ///  2. If empty / PoToken-gated, resolve fresh tracks via InnerTube `ANDROID_VR`
-    ///     (no PoToken on subs) and download those.
+    /// Primary path: let the YouTube player itself fetch timedtext (valid pot), intercept it.
+    /// Fallbacks: ANDROID_VR InnerTube tracks, then direct URLSession of page track URLs.
     static func fetchSubtitles(
         from track: CaptionTrack,
         videoID: String?,
         using webView: WKWebView?
     ) async throws -> [Subtitle] {
-        let pageSubs = try await downloadTrack(track, using: webView)
-        if !pageSubs.isEmpty { return pageSubs }
+        // 1) Player-side capture (works even when WEB timedtext requires PoToken)
+        if let webView {
+            if let body = try await captureViaPlayer(webView: webView, preferLang: track.languageCode) {
+                let parsed = parseCaptionBody(body)
+                if !parsed.isEmpty { return parsed }
+            }
+        }
 
+        // 2) ANDROID_VR track URLs (no PoToken on subs currently)
         if let videoID {
             let vrTracks = try await fetchTracksViaAndroidVR(videoID: videoID)
             let preferred = pickTrack(from: vrTracks, preferring: track.languageCode) ?? vrTracks.first
             if let preferred {
-                let vrSubs = try await downloadTrack(preferred, using: nil)
+                let vrSubs = try await downloadTrack(preferred, using: webView)
                 if !vrSubs.isEmpty { return vrSubs }
             }
-            // Last resort: try every VR track
             for t in vrTracks {
                 let subs = try await downloadTrack(t, using: nil)
                 if !subs.isEmpty { return subs }
             }
         }
-        return []
+
+        // 3) Last resort: direct download of the page track (often empty when exp=xpe)
+        return try await downloadTrack(track, using: webView)
+    }
+
+    @MainActor
+    private static func captureViaPlayer(webView: WKWebView, preferLang: String) async throws -> String? {
+        _ = try? await webView.evaluateJavaScript("window.__tbClearCaptionCapture && window.__tbClearCaptionCapture()")
+        let rawValue = try await webView.callAsyncJavaScript(
+            requestCaptionsAsyncJS,
+            arguments: ["preferLang": preferLang.isEmpty ? "en" : preferLang],
+            in: nil,
+            in: .page
+        )
+        guard let raw = rawValue as? String,
+              let data = raw.data(using: .utf8),
+              let result = try? JSONDecoder().decode(CaptureResult.self, from: data),
+              result.ok, !result.body.isEmpty else {
+            return nil
+        }
+        return result.body
     }
 
     private static func pickTrack(from tracks: [CaptionTrack], preferring languageCode: String) -> CaptionTrack? {
         if let exact = tracks.first(where: { $0.languageCode == languageCode && $0.kind != "asr" }) {
             return exact
         }
-        if let lang = tracks.first(where: { $0.languageCode.hasPrefix(String(languageCode.prefix(2))) && $0.kind != "asr" }) {
+        let prefix = String(languageCode.prefix(2))
+        if let lang = tracks.first(where: { $0.languageCode.hasPrefix(prefix) && $0.kind != "asr" }) {
             return lang
         }
         if let en = tracks.first(where: { $0.languageCode.hasPrefix("en") && $0.kind != "asr" }) {
@@ -291,11 +454,11 @@ enum SubtitleExtractor {
         return []
     }
 
-    /// InnerTube ANDROID_VR player — currently returns caption URLs that do not require PoToken.
     static func fetchTracksViaAndroidVR(videoID: String) async throws -> [CaptionTrack] {
         let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(
             "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12) gzip",
@@ -355,6 +518,23 @@ enum SubtitleExtractor {
         return urls.filter { seen.insert($0).inserted }
     }
 
+    static let fetchBodyAsyncJS = """
+    try {
+      const res = await fetch(url, { credentials: 'include', cache: 'no-store' });
+      if (!res.ok) return JSON.stringify({ ok: false, status: res.status, body: '' });
+      const body = await res.text();
+      return JSON.stringify({ ok: true, status: res.status, body: body });
+    } catch (e) {
+      return JSON.stringify({ ok: false, status: -1, body: String(e) });
+    }
+    """
+
+    struct FetchResult: Decodable {
+        let ok: Bool
+        let status: Int
+        let body: String
+    }
+
     @MainActor
     private static func fetchBodyViaWebView(_ urlString: String, webView: WKWebView) async throws -> String? {
         let rawValue = try await webView.callAsyncJavaScript(
@@ -375,8 +555,9 @@ enum SubtitleExtractor {
     private static func fetchBodyViaURLSession(_ urlString: String) async throws -> String {
         guard let url = URL(string: urlString) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
+        request.timeoutInterval = 20
         request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
             forHTTPHeaderField: "User-Agent"
         )
         request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
@@ -446,7 +627,6 @@ enum JSON3Parser {
             guard !cleaned.isEmpty else { continue }
             raw.append((startMs / 1000.0, durMs >= 0 ? durMs / 1000.0 : -1, cleaned))
         }
-        // Fill missing durations from the gap until the next cue (common in ASR karaoke JSON3).
         var subs: [Subtitle] = []
         for i in raw.indices {
             var duration = raw[i].duration
@@ -497,7 +677,6 @@ final class TimedTextParser: NSObject, XMLParserDelegate {
         if elementName == "text" || elementName == "p" {
             inText = true
             currentText = ""
-            // XML timedtext uses seconds; TTML may use begin/dur clocks — handle both.
             if let start = attributeDict["start"] {
                 currentStart = Double(start) ?? Self.parseClock(start)
             } else if let begin = attributeDict["begin"] {
@@ -531,7 +710,6 @@ final class TimedTextParser: NSObject, XMLParserDelegate {
 
     private static func parseClock(_ value: String) -> Double {
         if let plain = Double(value) { return plain }
-        // HH:MM:SS.mmm or MM:SS.mmm
         let parts = value.split(separator: ":").map(String.init)
         guard !parts.isEmpty else { return 0 }
         var seconds = 0.0

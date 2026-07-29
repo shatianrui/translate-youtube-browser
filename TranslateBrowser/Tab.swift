@@ -32,6 +32,8 @@ final class Tab: ObservableObject, Identifiable {
 
     private var lastLoadedVideoID: String?
     private var extractionTask: Task<Void, Never>?
+    /// Filled asynchronously when the page interceptor steals a player timedtext response.
+    private var pendingCapturedBody: String?
 
     init(urlText: String, isPrivate: Bool = false) {
         self.urlText = urlText
@@ -83,13 +85,19 @@ final class Tab: ObservableObject, Identifiable {
         currentIndex = subtitles.indices.contains(index) ? index : nil
     }
 
+    /// Called from the WKScriptMessageHandler when fetch/XHR hooks capture timedtext.
+    func onCapturedCaptionBody(_ body: String) {
+        pendingCapturedBody = body
+    }
+
     private func clearSubtitleState() {
         extractionTask?.cancel()
         subtitles = []
         currentIndex = nil
         lastLoadedVideoID = nil
+        pendingCapturedBody = nil
         statusMessage = ""
-        evalJS("window.__tbClearSubtitles && window.__tbClearSubtitles()")
+        evalJS("window.__tbClearSubtitles && window.__tbClearSubtitles(); window.__tbClearCaptionCapture && window.__tbClearCaptionCapture()")
     }
 
     /// Supports /watch?v=, youtu.be/<id>, /shorts/<id>, /embed/<id>, /live/<id>.
@@ -127,11 +135,20 @@ final class Tab: ObservableObject, Identifiable {
         statusMessage = "正在获取字幕…"
         subtitles = []
         currentIndex = nil
-        _ = try? await webView.evaluateJavaScript("window.__tbClearSubtitles && window.__tbClearSubtitles()")
+        pendingCapturedBody = nil
+        _ = try? await webView.evaluateJavaScript("""
+            window.__tbClearSubtitles && window.__tbClearSubtitles();
+            window.__tbClearCaptionCapture && window.__tbClearCaptionCapture();
+            """)
 
-        // After SPA navigation the player/captions can lag; poll before giving up.
+        // Give the player a moment after SPA navigation, then try player-side capture first
+        // (YouTube's own timedtext request carries a valid PoToken — external fetches often don't).
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        if Task.isCancelled { return }
+
+        statusMessage = "正在唤醒播放器字幕…"
         var tracks: [CaptionTrack] = []
-        for attempt in 0..<20 {
+        for attempt in 0..<16 {
             if Task.isCancelled { return }
             if let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
                let data = json.data(using: .utf8),
@@ -140,34 +157,49 @@ final class Tab: ObservableObject, Identifiable {
                 tracks = decoded
                 break
             }
-            if attempt < 19 {
+            if attempt < 15 {
                 try? await Task.sleep(nanoseconds: 350_000_000)
             }
         }
 
-        // Page tracks missing (or still loading): resolve via InnerTube ANDROID_VR.
         if tracks.isEmpty, let videoID {
             statusMessage = "正在通过备用通道获取字幕轨…"
             tracks = (try? await SubtitleExtractor.fetchTracksViaAndroidVR(videoID: videoID)) ?? []
         }
 
-        guard !tracks.isEmpty else {
-            statusMessage = "该视频没有可用字幕"
-            return
+        // Even without a track list, player capture may still succeed if CC can be toggled.
+        let track = tracks.isEmpty
+            ? CaptionTrack(baseUrl: "", languageCode: "en", kind: nil, name: nil)
+            : pickBestTrack(from: tracks)
+
+        if tracks.isEmpty {
+            statusMessage = "正在拦截播放器字幕请求…"
+        } else {
+            statusMessage = "正在下载字幕（\(track.languageCode)）…"
         }
 
-        let track = pickBestTrack(from: tracks)
-        statusMessage = "正在下载字幕（\(track.languageCode)）…"
-
         do {
-            let subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
+            // Prefer any body already stolen by the network hooks while we were polling.
+            var subs: [Subtitle] = []
+            if let pending = pendingCapturedBody {
+                pendingCapturedBody = nil
+                subs = SubtitleExtractor.parseCaptionBody(pending)
+            }
+            if subs.isEmpty {
+                subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
+            }
+            // One more chance: hooks may have filled pending during the async wait.
+            if subs.isEmpty, let pending = pendingCapturedBody {
+                pendingCapturedBody = nil
+                subs = SubtitleExtractor.parseCaptionBody(pending)
+            }
             guard !subs.isEmpty else {
-                statusMessage = "字幕内容为空（可能被 YouTube 限制，请稍后重试）"
+                statusMessage = "字幕获取被 YouTube 拦截，请点 ↻ 重试或先点开视频 CC 字幕"
                 return
             }
             if Task.isCancelled { return }
             subtitles = subs
-            statusMessage = "已提取 \(subs.count) 条字幕，开始翻译…"
+            statusMessage = "已提取 \(subs.count) 条，开始翻译…"
             await pushSubtitlesToPage()
             await translateAll()
         } catch {

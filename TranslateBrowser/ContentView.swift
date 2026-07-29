@@ -1,22 +1,27 @@
 import SwiftUI
 
+/// Safari-inspired chrome: full-bleed page, bottom capsule address field, toolbar row.
 struct ContentView: View {
     @StateObject private var tabsManager = TabsManager()
     @StateObject private var bookmarksStore = BookmarksStore()
     @FocusState private var addressFocused: Bool
     @State private var showShareSheet = false
+    @State private var editingURL = ""
 
     private var activeTab: Tab? { tabsManager.activeTab }
+    private var isPrivate: Bool { activeTab?.isPrivate ?? false }
 
     var body: some View {
-        VStack(spacing: 0) {
-            addressBar
-            progressBar
-            Divider()
-            webViewStack
-            Divider()
-            bottomToolbar
+        ZStack {
+            (isPrivate ? Color.black : Color(.systemBackground))
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                webViewStack
+                bottomChrome
+            }
         }
+        .preferredColorScheme(isPrivate ? .dark : nil)
         .sheet(isPresented: $tabsManager.showSettings) {
             SettingsView()
         }
@@ -30,6 +35,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $tabsManager.showTabsOverview) {
             TabsOverviewView(tabsManager: tabsManager)
+                .presentationDetents([.large])
         }
         .sheet(isPresented: $showShareSheet) {
             if let url = activeTab.flatMap({ URL(string: $0.urlText) }) {
@@ -41,62 +47,19 @@ struct ContentView: View {
                 activeTab?.load(bookmark.urlString)
             }
         }
+        .onChange(of: activeTab?.id) { _, _ in
+            addressFocused = false
+            editingURL = activeTab?.urlText ?? ""
+        }
     }
 
-    // A tiny wrapper so `.sheet(item:)` can drive the bookmarks list from a plain Bool intent.
     @State private var bookmarksSheetItem: BookmarksSheetToken?
     private struct BookmarksSheetToken: Identifiable { let id = UUID() }
 
-    private var addressBar: some View {
-        HStack(spacing: 8) {
-            TextField("输入网址或搜索", text: Binding(
-                get: { activeTab?.urlText ?? "" },
-                set: { activeTab?.urlText = $0 }
-            ))
-            .textFieldStyle(.roundedBorder)
-            .keyboardType(.URL)
-            .autocapitalization(.none)
-            .disableAutocorrection(true)
-            .focused($addressFocused)
-            .onSubmit {
-                addressFocused = false
-                activeTab?.loadFromAddressBar()
-            }
+    // MARK: - Page
 
-            Button {
-                activeTab?.reload()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-
-            Button {
-                tabsManager.showSettings = true
-            } label: {
-                Image(systemName: "gearshape")
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-    }
-
-    /// Thin Safari-style loading indicator: a colored bar that grows with estimatedProgress and
-    /// disappears once the page (or an already-complete tab) reaches 1.0.
-    private var progressBar: some View {
-        GeometryReader { geo in
-            let progress = activeTab?.estimatedProgress ?? 1
-            Rectangle()
-                .fill(Color.accentColor)
-                .frame(width: geo.size.width * progress, height: progress >= 1 ? 0 : 2)
-                .animation(.easeInOut(duration: 0.2), value: progress)
-        }
-        .frame(height: 2)
-    }
-
-    /// All tabs stay mounted (just hidden/non-interactive when inactive) so switching tabs
-    /// resumes exactly where a page was left — matching Safari suspending rather than discarding
-    /// backgrounded tabs — instead of reloading the page from scratch every time.
     private var webViewStack: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .top) {
             ForEach(tabsManager.tabs) { tab in
                 let isActive = tab.id == tabsManager.activeTabID
                 BrowserView(tab: tab, onOpenLinkInNewTab: { url in
@@ -106,132 +69,261 @@ struct ContentView: View {
                 .allowsHitTesting(isActive)
                 .accessibilityHidden(!isActive)
             }
-            if let activeTab, activeTab.showSubtitlePanel {
-                controlBar(for: activeTab)
-                    .padding(.trailing, 12)
+
+            // Thin Safari-style progress line under the status area
+            progressBar
+                .frame(maxHeight: .infinity, alignment: .top)
+
+            if let activeTab {
+                subtitleHUD(for: activeTab)
                     .padding(.top, 10)
-            } else if let activeTab {
-                Button {
-                    activeTab.showSubtitlePanel = true
-                } label: {
-                    Label("字幕", systemImage: "captions.bubble")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.black.opacity(0.45), in: Capsule())
-                        .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var progressBar: some View {
+        GeometryReader { geo in
+            let progress = activeTab?.estimatedProgress ?? 1
+            Rectangle()
+                .fill(Color.accentColor)
+                .frame(width: max(0, geo.size.width * progress), height: progress >= 0.999 ? 0 : 2)
+                .animation(.easeInOut(duration: 0.2), value: progress)
+        }
+        .frame(height: 2)
+        .allowsHitTesting(false)
+    }
+
+    private func subtitleHUD(for tab: Tab) -> some View {
+        Group {
+            if tab.showSubtitlePanel {
+                HStack(spacing: 10) {
+                    if tab.isTranslating {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .tint(.white)
+                    }
+                    Image(systemName: "captions.bubble.fill")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.9))
+                    Text(tab.statusMessage.isEmpty ? "打开 YouTube 视频自动叠加双语字幕" : tab.statusMessage)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Button { tab.showSubtitleList = true } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .disabled(tab.subtitles.isEmpty)
+                    Button { Task { await tab.translateAll() } } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(tab.subtitles.isEmpty || tab.isTranslating)
+                    Button { tab.reload() } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    Button { tab.showSubtitlePanel = false } label: {
+                        Image(systemName: "xmark")
+                    }
                 }
-                .padding(.trailing, 12)
-                .padding(.top, 10)
+                .font(.caption)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial.opacity(0.95), in: Capsule())
+                .background(Color.black.opacity(0.35), in: Capsule())
+            } else {
+                HStack {
+                    Spacer()
+                    Button {
+                        tab.showSubtitlePanel = true
+                    } label: {
+                        Label("字幕", systemImage: "captions.bubble")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .background(Color.black.opacity(0.35), in: Capsule())
+                            .foregroundStyle(.white)
+                    }
+                }
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    // MARK: - Safari bottom chrome
+
+    private var bottomChrome: some View {
+        VStack(spacing: 8) {
+            addressCapsule
+            toolbarRow
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .background {
+            Rectangle()
+                .fill(.bar)
+                .ignoresSafeArea(edges: .bottom)
+                .overlay(alignment: .top) {
+                    Divider()
+                }
         }
     }
 
-    /// Small floating status/controls pill. The bilingual caption text itself is rendered by
-    /// the injected page script directly inside the YouTube player's own DOM (see
-    /// SubtitleExtractor.bilingualOverlayJS), not here — that way it stays visible even when the
-    /// player goes fullscreen, which a SwiftUI overlay drawn on top of the WKWebView cannot do.
-    private func controlBar(for tab: Tab) -> some View {
-        HStack(spacing: 10) {
-            if tab.isTranslating {
-                ProgressView()
-                    .scaleEffect(0.7)
-                    .tint(.white)
+    /// Safari-like capsule: lock + host when idle; editable URL when focused.
+    private var addressCapsule: some View {
+        HStack(spacing: 8) {
+            if addressFocused {
+                TextField("搜索或输入网站", text: $editingURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .submitLabel(.go)
+                    .focused($addressFocused)
+                    .font(.body)
+                    .onSubmit { commitAddress() }
+            } else {
+                Button {
+                    editingURL = activeTab?.urlText ?? ""
+                    addressFocused = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: compactIsSecure ? "lock.fill" : "globe")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(compactHost)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
             }
-            Text(tab.statusMessage.isEmpty ? "打开 YouTube 视频页自动提取双语字幕" : tab.statusMessage)
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.85))
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Button {
-                tab.showSubtitleList = true
-            } label: {
-                Image(systemName: "list.bullet")
-            }
-            .disabled(tab.subtitles.isEmpty)
-            Button {
-                Task { await tab.translateAll() }
-            } label: {
-                Image(systemName: "arrow.triangle.2.circlepath")
-            }
-            .disabled(tab.subtitles.isEmpty || tab.isTranslating)
-            Button {
-                tab.reload()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            Button {
-                tab.showSubtitlePanel = false
-            } label: {
-                Image(systemName: "xmark")
+
+            if addressFocused {
+                Button("取消") {
+                    addressFocused = false
+                }
+                .font(.subheadline)
+            } else {
+                Button {
+                    if (activeTab?.estimatedProgress ?? 1) < 0.999 {
+                        activeTab?.stopLoading()
+                    } else {
+                        activeTab?.reload()
+                    }
+                } label: {
+                    Image(systemName: (activeTab?.estimatedProgress ?? 1) < 0.999 ? "xmark" : "arrow.clockwise")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    tabsManager.showSettings = true
+                } label: {
+                    Image(systemName: "textformat.size")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
             }
         }
-        .font(.caption)
-        .foregroundStyle(.white)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.black.opacity(0.45), in: Capsule())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            Capsule(style: .continuous)
+                .fill(isPrivate ? Color.white.opacity(0.12) : Color(.tertiarySystemFill))
+        )
     }
 
-    /// Classic Safari bottom toolbar: back, forward, share, bookmark, tabs — five icons, evenly
-    /// spaced, tinted dark when the active tab is a private tab.
-    private var bottomToolbar: some View {
-        let isPrivate = activeTab?.isPrivate ?? false
-        return HStack {
-            Spacer()
-            Button {
+    private var compactHost: String {
+        guard let raw = activeTab?.urlText, let url = URL(string: raw), let host = url.host, !host.isEmpty else {
+            return "搜索或输入网站"
+        }
+        return host.replacingOccurrences(of: #"^www\."#, with: "", options: .regularExpression)
+    }
+
+    private var compactIsSecure: Bool {
+        (activeTab?.urlText ?? "").hasPrefix("https://")
+    }
+
+    private func commitAddress() {
+        addressFocused = false
+        guard let tab = activeTab else { return }
+        tab.urlText = editingURL
+        tab.loadFromAddressBar()
+    }
+
+    private var toolbarRow: some View {
+        HStack {
+            toolbarButton("chevron.left", disabled: !(activeTab?.canGoBack ?? false)) {
                 activeTab?.goBack()
-            } label: {
-                Image(systemName: "chevron.left")
             }
-            .disabled(!(activeTab?.canGoBack ?? false))
             Spacer()
-            Button {
+            toolbarButton("chevron.right", disabled: !(activeTab?.canGoForward ?? false)) {
                 activeTab?.goForward()
-            } label: {
-                Image(systemName: "chevron.right")
             }
-            .disabled(!(activeTab?.canGoForward ?? false))
             Spacer()
-            Button {
+            toolbarButton("square.and.arrow.up", disabled: activeTab == nil) {
                 showShareSheet = true
-            } label: {
-                Image(systemName: "square.and.arrow.up")
             }
-            .disabled(activeTab == nil)
             Spacer()
-            Button {
-                toggleBookmark()
-            } label: {
-                Image(systemName: isBookmarked ? "star.fill" : "star")
-            }
-            .disabled(activeTab == nil)
-            Spacer()
-            Button {
+            toolbarButton(isBookmarked ? "book.fill" : "book", disabled: activeTab == nil) {
+                // Long-press style: tap toggles bookmark; use bookmarks list via hold alternative —
+                // Safari puts bookmark toggle here; we open the list on a second icon via tabs.
+                // Keep Safari mapping: open bookmarks library.
                 bookmarksSheetItem = BookmarksSheetToken()
-            } label: {
-                Image(systemName: "book")
+            }
+            .contextMenu {
+                Button {
+                    toggleBookmark()
+                } label: {
+                    Label(isBookmarked ? "删除书签" : "添加书签", systemImage: isBookmarked ? "star.slash" : "star")
+                }
+                Button {
+                    bookmarksSheetItem = BookmarksSheetToken()
+                } label: {
+                    Label("书签列表", systemImage: "book")
+                }
             }
             Spacer()
             Button {
                 tabsManager.showTabsOverview = true
             } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: "square.on.square")
-                    Text("\(tabsManager.tabs.count)")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(3)
-                        .background(Color.accentColor, in: Circle())
-                        .offset(x: 10, y: -8)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(isPrivate ? Color.white : Color.accentColor, lineWidth: 1.8)
+                        .frame(width: 20, height: 20)
+                    Text("\(min(tabsManager.tabs.count, 99))")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(isPrivate ? Color.white : Color.accentColor)
                 }
+                .frame(width: 44, height: 36)
+                .contentShape(Rectangle())
             }
-            Spacer()
+            .buttonStyle(.plain)
         }
-        .font(.system(size: 18))
-        .padding(.vertical, 10)
-        .background(isPrivate ? Color.black : Color(.secondarySystemBackground))
-        .foregroundStyle(isPrivate ? Color.white : Color.primary)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 2)
+    }
+
+    private func toolbarButton(_ systemName: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(disabled ? Color.secondary.opacity(0.35) : (isPrivate ? Color.white : Color.accentColor))
+                .frame(width: 44, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
     }
 
     private var isBookmarked: Bool {
@@ -258,25 +350,26 @@ struct SubtitleListView: View {
             ScrollViewReader { proxy in
                 List(tab.subtitles.indices, id: \.self) { i in
                     let sub = tab.subtitles[i]
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(formatTime(sub.start))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                         Text(sub.text)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if let translation = sub.translation {
+                        if let translation = sub.translation, !translation.isEmpty {
                             Text(translation)
-                                .font(.subheadline)
+                                .font(.body)
                         }
                     }
                     .id(i)
-                    .background(i == tab.currentIndex ? Color.accentColor.opacity(0.1) : .clear)
+                    .listRowBackground(i == tab.currentIndex ? Color.accentColor.opacity(0.12) : Color.clear)
                 }
-                .navigationTitle("字幕列表")
+                .navigationTitle("双语字幕")
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("关闭") { dismiss() }
+                        Button("完成") { dismiss() }
                     }
                 }
                 .onChange(of: tab.currentIndex) { _, newValue in

@@ -14,12 +14,7 @@ struct BrowserView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        // Let YouTube's fullscreen button use the standards Fullscreen API on the player's own
-        // DOM container (which our injected script redirects it to) instead of falling back to
-        // a separate native full-screen video controller that would cover our caption overlay.
         config.preferences.isElementFullscreenEnabled = true
-        // Private tabs get an ephemeral, non-persistent data store: no cookies, cache, or
-        // history survive once the tab is closed, matching Safari's private browsing.
         if tab.isPrivate {
             config.websiteDataStore = .nonPersistent()
         }
@@ -27,6 +22,7 @@ struct BrowserView: UIViewRepresentable {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "tbUrlChanged")
         contentController.add(context.coordinator, name: "tbActiveIndex")
+        contentController.add(context.coordinator, name: "tbCaptionBody")
         contentController.addUserScript(WKUserScript(
             source: SubtitleExtractor.bilingualOverlayJS,
             injectionTime: .atDocumentStart,
@@ -35,10 +31,14 @@ struct BrowserView: UIViewRepresentable {
         config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        // Desktop Safari UA so YouTube serves the full player (better caption / fullscreen APIs).
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.backgroundColor = .systemBackground
+        webView.isOpaque = true
         tab.webView = webView
         context.coordinator.observe(webView)
 
@@ -66,14 +66,6 @@ struct BrowserView: UIViewRepresentable {
             self.onOpenLinkInNewTab = onOpenLinkInNewTab
         }
 
-        /// YouTube is a single-page app: navigating between videos happens via the History API
-        /// (no full page load), so WKNavigationDelegate.didFinish never fires again after the
-        /// first load. WKWebView.url is KVO-observable and does update on History API pushes,
-        /// so that's the reliable signal for "the user is now watching a different video." The
-        /// injected script's "tbUrlChanged" message is a second, redundant signal for the same
-        /// event, in case a given YouTube build's pushState usage doesn't trip WKWebView's KVO.
-        /// The other KVO paths drive the Safari-style chrome: progress bar, back/forward state,
-        /// and the tab switcher's title.
         func observe(_ webView: WKWebView) {
             observations = [
                 webView.observe(\.url, options: [.new]) { [weak self] _, change in
@@ -115,7 +107,7 @@ struct BrowserView: UIViewRepresentable {
         }
 
         @objc func handleRefresh() {
-            Task { @MainActor in tab.webView?.reload() }
+            Task { @MainActor in tab.reload() }
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -126,12 +118,17 @@ struct BrowserView: UIViewRepresentable {
             case "tbActiveIndex":
                 guard let index = message.body as? Int else { return }
                 Task { @MainActor in tab.onActiveIndexChanged(index) }
+            case "tbCaptionBody":
+                // Passive capture while the player loads CC — stash for the extraction task.
+                if let dict = message.body as? [String: Any],
+                   let body = dict["body"] as? String, body.count > 20 {
+                    Task { @MainActor in tab.onCapturedCaptionBody(body) }
+                }
             default:
                 break
             }
         }
 
-        // Safari-style long-press link menu: open in a new tab, or copy the link.
         func webView(
             _ webView: WKWebView,
             contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo,
