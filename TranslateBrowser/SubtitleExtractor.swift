@@ -300,8 +300,42 @@ enum SubtitleExtractor {
           || player;
       }
       function findVideo(container) {
-        return (container && container.querySelector('video')) || document.querySelector('video');
+        // Prefer the main content video — never the ad slot video.
+        var scope = container || document;
+        return scope.querySelector('video.html5-main-video')
+          || scope.querySelector('.html5-video-container video')
+          || scope.querySelector('video')
+          || document.querySelector('#movie_player video.html5-main-video')
+          || document.querySelector('video.html5-main-video')
+          || document.querySelector('video');
       }
+
+      function isAdShowing() {
+        var p = findPlayerContainer();
+        if (p && p.classList && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting'))) {
+          return true;
+        }
+        return !!document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay');
+      }
+
+      /** Media clock used by YouTube's own CC — prefer player API over <video>.currentTime. */
+      function mediaTime() {
+        var p = findPlayerContainer();
+        if (p) {
+          try {
+            if (typeof p.getCurrentTime === 'function') {
+              var pt = p.getCurrentTime();
+              if (typeof pt === 'number' && isFinite(pt) && pt >= 0) return pt;
+            }
+          } catch (e) {}
+        }
+        var host = findVideoHost();
+        var video = findVideo(host);
+        if (!video) return -1;
+        var t = video.currentTime;
+        return (typeof t === 'number' && isFinite(t)) ? t : -1;
+      }
+
       function enterDOMFullscreen() {
         var host = findPlayerContainer();
         var target = host && (host.querySelector('.html5-video-player') || host);
@@ -408,6 +442,8 @@ enum SubtitleExtractor {
       }
       // Strict timing: show cue only while playhead is inside the original window
       // [s, e). No sticky linger — that was causing A/V desync after seeks / gaps.
+      // Small lead compensates for paint latency so lines feel locked to speech.
+      var SYNC_LEAD = 0.06;
       function findCue(t) {
         var subs = window.__tbSubs;
         if (!subs || !subs.length) return -1;
@@ -422,11 +458,21 @@ enum SubtitleExtractor {
         var end = (typeof cue.e === 'number' && cue.e > cue.s)
           ? cue.e
           : (cue.s + Math.max(cue.d || 0, 0.05));
+        // If we landed past this cue (gap), stay blank — do not stick.
         if (t >= cue.s && t < end) return cand;
+        // Rare overlap / abut: if next cue already started, prefer it.
+        var next = cand + 1;
+        if (next < subs.length && t >= subs[next].s) {
+          var n = subs[next];
+          var nEnd = (typeof n.e === 'number' && n.e > n.s) ? n.e : (n.s + Math.max(n.d || 0, 0.05));
+          if (t < nEnd) return next;
+        }
         return -1;
       }
       var lastIndex = -2;
       var lastSig = '';
+      var lastInlineFix = 0;
+      var cachedVideo = null;
       function cueSignature(idx) {
         if (idx < 0 || !window.__tbSubs[idx]) return '';
         var s = window.__tbSubs[idx];
@@ -457,54 +503,79 @@ enum SubtitleExtractor {
         }
         win.style.display = (s.o || s.t) ? 'block' : 'none';
       }
-      function tick() {
-        forceAllVideosInline(document);
-        var host = findVideoHost();
-        var video = findVideo(host);
-        ensureOverlay();
-        if (!video) return;
-        var t = video.currentTime;
-        var idx = window.__tbSubs.length ? findCue(t) : -1;
+      function tick(force) {
+        var now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        // Inline-video fixes are unrelated to caption sync — don't do them every frame.
+        if (force || now - lastInlineFix > 1500) {
+          forceAllVideosInline(document);
+          lastInlineFix = now;
+          cachedVideo = null;
+        }
+        if (isAdShowing()) {
+          if (lastIndex !== -1 || force) {
+            lastIndex = -1;
+            lastSig = '';
+            renderCue(-1);
+          }
+          return;
+        }
+        var t = mediaTime();
+        if (t < 0) return;
+        // Lead the clock slightly so captions appear with speech (paint + decode lag).
+        var idx = window.__tbSubs.length ? findCue(t + SYNC_LEAD) : -1;
         var sig = cueSignature(idx);
-        if (idx === lastIndex && sig === lastSig) return;
+        if (!force && idx === lastIndex && sig === lastSig) return;
         lastIndex = idx;
         lastSig = sig;
         renderCue(idx);
         post('tbActiveIndex', idx);
       }
+      function bump() { lastIndex = -2; lastSig = ''; tick(true); }
       document.addEventListener('timeupdate', function(e) {
-        if (e.target && e.target.tagName === 'VIDEO') tick();
+        if (e.target && e.target.tagName === 'VIDEO') tick(false);
       }, true);
       document.addEventListener('seeked', function(e) {
-        if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; lastSig = ''; tick(); }
+        if (e.target && e.target.tagName === 'VIDEO') bump();
       }, true);
       document.addEventListener('seeking', function(e) {
-        if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; lastSig = ''; tick(); }
+        if (e.target && e.target.tagName === 'VIDEO') bump();
       }, true);
-      document.addEventListener('fullscreenchange', function() { lastIndex = -2; lastSig = ''; tick(); });
-      document.addEventListener('webkitfullscreenchange', function() { lastIndex = -2; lastSig = ''; tick(); });
-      // rAF keeps bilingual lines locked to the video clock more tightly than 200ms polling.
+      document.addEventListener('ratechange', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') bump();
+      }, true);
+      document.addEventListener('play', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') tick(false);
+      }, true);
+      document.addEventListener('pause', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') tick(true);
+      }, true);
+      document.addEventListener('fullscreenchange', bump);
+      document.addEventListener('webkitfullscreenchange', bump);
+      // rAF: sample the player clock every frame while playing for tight A/V lock.
       (function rafLoop() {
-        try { tick(); } catch (e) {}
+        try { tick(false); } catch (e) {}
         requestAnimationFrame(rafLoop);
       })();
 
       window.__tbSetSubtitles = function(subs) {
         var list = Array.isArray(subs) ? subs : [];
         // Normalize end times client-side too (clip to next start) in case an older
-        // payload still sends only {s,d}.
+        // payload still sends only {s,d}. Never extend past the next cue.
         for (var i = 0; i < list.length; i++) {
           var cue = list[i];
-          if (typeof cue.e !== 'number' || !(cue.e > cue.s)) {
-            var rawEnd = cue.s + Math.max(cue.d || 0, 0.05);
-            var nextStart = (i + 1 < list.length) ? list[i + 1].s : rawEnd;
+          var nextStart = (i + 1 < list.length) ? list[i + 1].s : null;
+          var rawEnd = (typeof cue.e === 'number' && cue.e > cue.s)
+            ? cue.e
+            : (cue.s + Math.max(cue.d || 0, 0.05));
+          if (nextStart != null && isFinite(nextStart)) {
             cue.e = Math.min(rawEnd, nextStart);
+          } else {
+            cue.e = rawEnd;
           }
+          if (!(cue.e > cue.s)) cue.e = cue.s + 0.05;
         }
         window.__tbSubs = list;
-        lastIndex = -2;
-        lastSig = '';
-        tick();
+        bump();
       };
       window.__tbClearSubtitles = function() {
         window.__tbSubs = [];
@@ -807,16 +878,19 @@ enum JSON3Parser {
             var duration = raw[i].duration
             if duration < 0 {
                 if i + 1 < raw.count {
-                    duration = max(raw[i + 1].start - raw[i].start, 0.05)
+                    duration = max(raw[i + 1].start - raw[i].start, 0.001)
                 } else {
                     duration = 2.0
                 }
             }
-            // Clip to next cue start so stored windows match YouTube display timing.
+            // Clip to next cue start — never invent overlap (that breaks A/V sync).
             if i + 1 < raw.count {
-                duration = min(duration, max(raw[i + 1].start - raw[i].start, 0.05))
+                let gap = raw[i + 1].start - raw[i].start
+                if gap > 0 {
+                    duration = min(duration, gap)
+                }
             }
-            subs.append(Subtitle(start: raw[i].start, duration: max(duration, 0.05), text: raw[i].text))
+            subs.append(Subtitle(start: raw[i].start, duration: max(duration, 0.001), text: raw[i].text))
         }
         // Keep original cue boundaries — merging identical lines across gaps breaks A/V sync.
         return subs
@@ -836,7 +910,20 @@ final class TimedTextParser: NSObject, XMLParserDelegate {
         let parser = XMLParser(data: data)
         parser.delegate = self
         parser.parse()
-        return subtitles
+        // Clip each cue to the next start so XML tracks match json3 timing rules.
+        guard subtitles.count > 1 else { return subtitles }
+        var clipped: [Subtitle] = []
+        clipped.reserveCapacity(subtitles.count)
+        for i in subtitles.indices {
+            let sub = subtitles[i]
+            var duration = max(sub.duration, 0.001)
+            if i + 1 < subtitles.count {
+                let gap = subtitles[i + 1].start - sub.start
+                if gap > 0 { duration = min(duration, gap) }
+            }
+            clipped.append(Subtitle(start: sub.start, duration: duration, text: sub.text, translation: sub.translation))
+        }
+        return clipped
     }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {

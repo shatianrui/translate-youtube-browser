@@ -289,17 +289,18 @@ final class Tab: ObservableObject, Identifiable {
         guard let webView else { return }
         let payload: [PageSubtitle] = subtitles.indices.map { i in
             let sub = subtitles[i]
-            let rawEnd = sub.start + max(sub.duration, 0.05)
+            let rawEnd = sub.start + max(sub.duration, 0.001)
             let end: Double
             if i + 1 < subtitles.count {
-                // YouTube never keeps the previous line up once the next cue starts.
+                // Never spill into the next cue — that desyncs display vs speech.
                 end = min(rawEnd, subtitles[i + 1].start)
             } else {
                 end = rawEnd
             }
+            let safeEnd = end > sub.start ? end : (sub.start + 0.05)
             return PageSubtitle(
                 s: sub.start,
-                e: max(end, sub.start + 0.05),
+                e: safeEnd,
                 o: sub.text,
                 t: sub.translation ?? ""
             )
@@ -323,17 +324,38 @@ final class Tab: ObservableObject, Identifiable {
     /// Read the in-page video clock so realtime / prefetch follow seeks.
     private func currentPlaybackTime() async -> Double? {
         guard let webView else { return nil }
-        let js = "(document.querySelector('video') ? document.querySelector('video').currentTime : -1)"
+        let js = """
+        (function() {
+          var p = document.getElementById('movie_player')
+            || document.getElementById('shorts-player')
+            || document.querySelector('.html5-video-player');
+          try {
+            if (p && typeof p.getCurrentTime === 'function') {
+              var t = p.getCurrentTime();
+              if (typeof t === 'number' && isFinite(t) && t >= 0) return t;
+            }
+          } catch (e) {}
+          var v = document.querySelector('video.html5-main-video') || document.querySelector('video');
+          return v ? v.currentTime : -1;
+        })()
+        """
         guard let t = try? await webView.evaluateJavaScript(js) as? Double, t >= 0 else { return nil }
         return t
     }
 
     private func indexNear(time: Double) -> Int {
         if let i = currentIndex, subtitles.indices.contains(i) { return i }
-        if let i = subtitles.firstIndex(where: { time < $0.start + max($0.duration, 0.05) }) {
+        // Match page-side [start, end) windows (end clipped to next start).
+        for i in subtitles.indices {
+            let start = subtitles[i].start
+            let rawEnd = start + max(subtitles[i].duration, 0.001)
+            let end = i + 1 < subtitles.count ? min(rawEnd, subtitles[i + 1].start) : rawEnd
+            if time >= start && time < max(end, start + 0.001) { return i }
+        }
+        if let i = subtitles.lastIndex(where: { $0.start <= time }) {
             return i
         }
-        return max(0, subtitles.count - 1)
+        return 0
     }
 
     /// Current line (+ maybe the next) for minimum-latency realtime translation.
