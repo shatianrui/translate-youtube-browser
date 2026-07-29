@@ -38,6 +38,11 @@ final class Tab: ObservableObject, Identifiable {
     private var translationEpoch = 0
     private var lastSeekNudgeTime: TimeInterval = 0
 
+    /// Real-time cue translation（播放头落到哪条，就优先翻哪条）
+    private var realtimeTask: Task<Void, Never>?
+    /// Prevent duplicate LLM calls for the same cue index (realtime + prefetch).
+    private var translatingIndices: Set<Int> = []
+
     init(urlText: String, isPrivate: Bool = false) {
         self.urlText = urlText
         self.isPrivate = isPrivate
@@ -102,12 +107,17 @@ final class Tab: ObservableObject, Identifiable {
     func onActiveIndexChanged(_ index: Int) {
         let previous = currentIndex
         currentIndex = subtitles.indices.contains(index) ? index : nil
-        // Seek / fast-forward into untranslated region → restart so realtime hits the new cue ASAP.
-        guard let currentIndex, needsTranslation(currentIndex) else { return }
+        guard let currentIndex else { return }
+
+        // 1) Immersive realtime: cue appears => translate immediately.
+        if shouldTranslateIndex(currentIndex) {
+            scheduleRealtimeCueTranslation(for: currentIndex)
+        }
+
+        // 2) Only restart prefetch on real seeks (avoid restarting on every single line change).
         if let previous, abs(currentIndex - previous) >= 2 {
             nudgeTranslationPriority()
-        } else if previous == nil || needsTranslation(currentIndex) {
-            // Crossing into a cue that still lacks a translation — wake the realtime loop.
+        } else if previous == nil {
             nudgeTranslationPriority()
         }
     }
@@ -121,13 +131,15 @@ final class Tab: ObservableObject, Identifiable {
         let now = Date().timeIntervalSince1970
         guard now - lastSeekNudgeTime > 0.35 else { return }
         lastSeekNudgeTime = now
-        // Always restart: cancels an in-flight prefetch chunk and prioritizes the new playhead.
+        // Restart prefetch task so pending windows align with the new playhead.
         startRealtimeTranslation()
     }
 
     private func clearSubtitleState() {
         extractionTask?.cancel()
         translationTask?.cancel()
+        realtimeTask?.cancel()
+        translatingIndices.removeAll()
         translationEpoch &+= 1
         subtitles = []
         currentIndex = nil
@@ -254,6 +266,14 @@ final class Tab: ObservableObject, Identifiable {
             statusMessage = ""
             await pushSubtitlesToPage()
             startRealtimeTranslation()
+
+            // Prime the current cue translation immediately (immersive).
+            if let playhead = await currentPlaybackTime() {
+                let center = indexNear(time: playhead)
+                if shouldTranslateIndex(center) {
+                    scheduleRealtimeCueTranslation(for: center)
+                }
+            }
         } catch {
             if Task.isCancelled { return }
             statusMessage = "字幕获取失败: \(error.localizedDescription)"
@@ -340,6 +360,11 @@ final class Tab: ObservableObject, Identifiable {
         return t == nil || t?.isEmpty == true
     }
 
+    private func shouldTranslateIndex(_ index: Int) -> Bool {
+        guard needsTranslation(index) else { return false }
+        return !translatingIndices.contains(index)
+    }
+
     /// Read the in-page video clock so realtime / prefetch follow seeks.
     private func currentPlaybackTime() async -> Double? {
         guard let webView else { return nil }
@@ -380,14 +405,14 @@ final class Tab: ObservableObject, Identifiable {
     /// Current line (+ maybe the next) for minimum-latency realtime translation.
     private func realtimeChunk(center: Int) -> [Int]? {
         var indices: [Int] = []
-        if needsTranslation(center) { indices.append(center) }
+        if shouldTranslateIndex(center) { indices.append(center) }
         let next = center + 1
-        if next < subtitles.count, needsTranslation(next) {
+        if next < subtitles.count, shouldTranslateIndex(next) {
             indices.append(next)
         }
         // Also cover a cue that just started 1 behind if still on screen overlap.
         let prev = center - 1
-        if prev >= 0, needsTranslation(prev), indices.count < 3 {
+        if prev >= 0, shouldTranslateIndex(prev), indices.count < 3 {
             indices.insert(prev, at: 0)
         }
         return indices.isEmpty ? nil : indices
@@ -397,7 +422,10 @@ final class Tab: ObservableObject, Identifiable {
     private func prefetchChunk(center: Int, playhead: Double, maxCount: Int, cueWindow: Int, secondsWindow: Double) -> [Int]? {
         let windowEndIndex = min(subtitles.count, center + cueWindow)
         let windowEndTime = playhead + secondsWindow
-        guard let start = (center..<windowEndIndex).first(where: { needsTranslation($0) }) else {
+        // Immersive: skip realtime cue itself; only prefetch following cues.
+        let startRangeStart = min(center + 1, subtitles.count)
+        guard startRangeStart < windowEndIndex,
+              let start = (startRangeStart..<windowEndIndex).first(where: { shouldTranslateIndex($0) }) else {
             return nil
         }
         // Don't prefetch far beyond the time window either.
@@ -407,7 +435,7 @@ final class Tab: ObservableObject, Identifiable {
         var i = start + 1
         while indices.count < maxCount,
               i < windowEndIndex,
-              needsTranslation(i),
+              shouldTranslateIndex(i),
               subtitles[i].start <= windowEndTime {
             indices.append(i)
             i += 1
@@ -428,6 +456,14 @@ final class Tab: ObservableObject, Identifiable {
         }
         await pushSubtitlesToPage()
         startRealtimeTranslation()
+
+        // Start immersive realtime translation for the currently playing cue.
+        if let playhead = await currentPlaybackTime() {
+            let center = indexNear(time: playhead)
+            if shouldTranslateIndex(center) {
+                scheduleRealtimeCueTranslation(for: center)
+            }
+        }
     }
 
     private func startRealtimeTranslation() {
@@ -438,6 +474,8 @@ final class Tab: ObservableObject, Identifiable {
         }
         guard !subtitles.isEmpty else { return }
         translationTask?.cancel()
+        realtimeTask?.cancel()
+        translatingIndices.removeAll()
         translationEpoch &+= 1
         let epoch = translationEpoch
         translationTask = Task { [weak self] in
@@ -454,7 +492,7 @@ final class Tab: ObservableObject, Identifiable {
             model: model
         )
 
-        // Realtime = tiny batches for low latency; prefetch = modest ahead fill.
+        // Prefetch only (realtime cue translation is triggered by `tbActiveIndex`).
         let prefetchBatch = 8
         let prefetchCues = 20          // ~rolling cue window ahead of playhead
         let prefetchSeconds: Double = 75
@@ -465,15 +503,7 @@ final class Tab: ObservableObject, Identifiable {
                 ?? 0
             let center = indexNear(time: playhead)
 
-            // 1) Realtime — current (and immediate next) cue first.
-            if let indices = realtimeChunk(center: center) {
-                isTranslating = true
-                let ok = await translateIndices(indices, service: service, epoch: epoch)
-                if !ok { return }
-                continue
-            }
-
-            // 2) Prefetch — only within the rolling ahead window.
+            // Prefetch — only within the rolling ahead window.
             if let indices = prefetchChunk(
                 center: center,
                 playhead: playhead,
@@ -487,7 +517,7 @@ final class Tab: ObservableObject, Identifiable {
                 continue
             }
 
-            // 3) Window satisfied — idle briefly; playhead advance / seek wakes more work.
+            // Window satisfied — idle briefly; playhead advance / seek wakes more work.
             isTranslating = false
             try? await Task.sleep(nanoseconds: 350_000_000)
         }
@@ -498,9 +528,32 @@ final class Tab: ObservableObject, Identifiable {
         }
     }
 
+    private func scheduleRealtimeCueTranslation(for center: Int) {
+        guard shouldTranslateIndex(center) else { return }
+        let epoch = translationEpoch
+        let service = TranslationService(
+            provider: provider,
+            apiKey: apiKey,
+            model: model
+        )
+
+        realtimeTask?.cancel()
+        realtimeTask = Task { [weak self] in
+            guard let self else { return }
+            guard self.translationEpoch == epoch else { return }
+            guard let indices = self.realtimeChunk(center: center) else { return }
+            let ok = await self.translateIndices(indices, service: service, epoch: epoch)
+            if !ok { return }
+        }
+    }
+
     @discardableResult
     private func translateIndices(_ indices: [Int], service: TranslationService, epoch: Int) async -> Bool {
         guard !indices.isEmpty else { return true }
+        // Mark in-flight so realtime/prefetch won't duplicate the same cue.
+        translatingIndices.formUnion(indices)
+        defer { translatingIndices.subtract(indices) }
+
         let texts = indices.map { subtitles[$0].text }
         do {
             let translated = try await service.translate(texts: texts, to: targetLang)
@@ -525,6 +578,8 @@ final class Tab: ObservableObject, Identifiable {
     func reload() {
         lastLoadedVideoID = nil
         translationTask?.cancel()
+        realtimeTask?.cancel()
+        translatingIndices.removeAll()
         translationEpoch &+= 1
         webView?.reload()
     }
