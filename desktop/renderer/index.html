@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; connect-src https: http:; media-src * blob:;">
+  <title>译览</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="chrome">
+      <div class="tabs-bar" id="tabsBar"></div>
+      <div class="toolbar">
+        <button class="icon-btn" id="btnBack" title="后退" aria-label="后退">‹</button>
+        <button class="icon-btn" id="btnForward" title="前进" aria-label="前进">›</button>
+        <button class="icon-btn" id="btnReload" title="刷新" aria-label="刷新">↻</button>
+        <form id="addressForm" class="address-form" autocomplete="off">
+          <input id="addressInput" type="text" placeholder="输入网址或搜索" spellcheck="false" />
+        </form>
+        <button class="icon-btn" id="btnBookmark" title="收藏" aria-label="收藏">☆</button>
+        <button class="icon-btn" id="btnBookmarks" title="收藏夹" aria-label="收藏夹">☰</button>
+        <button class="icon-btn" id="btnSubtitles" title="字幕列表" aria-label="字幕列表">≡</button>
+        <button class="icon-btn" id="btnRetranslate" title="重新翻译" aria-label="重新翻译">⇄</button>
+        <button class="icon-btn" id="btnSettings" title="设置" aria-label="设置">⚙</button>
+        <button class="icon-btn new-tab" id="btnNewTab" title="新建标签页（Shift+点击为隐私）" aria-label="新建标签页">+</button>
+      </div>
+      <div class="progress" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="status-bar" id="statusBar">打开 YouTube 视频页自动提取双语字幕</div>
+    </header>
+
+    <main id="webviewHost" class="webview-host"></main>
+  </div>
+
+  <!-- Settings modal -->
+  <dialog id="settingsDialog" class="modal">
+    <form method="dialog" id="settingsForm" class="modal-card">
+      <h2>设置</h2>
+      <label>
+        翻译服务商
+        <select id="settingProvider"></select>
+      </label>
+      <label>
+        API Key
+        <input id="settingApiKey" type="password" autocomplete="off" placeholder="sk-..." />
+      </label>
+      <label>
+        模型（可留空使用默认）
+        <input id="settingModel" type="text" autocomplete="off" />
+      </label>
+      <label>
+        目标语言
+        <select id="settingTargetLang">
+          <option>中文</option>
+          <option>English</option>
+          <option>日本語</option>
+          <option>한국어</option>
+          <option>Français</option>
+          <option>Deutsch</option>
+          <option>Español</option>
+          <option>Русский</option>
+          <option>繁體中文</option>
+        </select>
+      </label>
+      <p class="hint">打开 YouTube 视频后会自动提取字幕，并在画面内叠加原文 + 译文。API Key 仅保存在本机。</p>
+      <div class="modal-actions">
+        <button type="submit" value="cancel" class="btn ghost">取消</button>
+        <button type="submit" value="save" class="btn primary" id="settingsSave">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Bookmarks modal -->
+  <dialog id="bookmarksDialog" class="modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>收藏夹</h2>
+        <button class="icon-btn" id="bookmarksClose" aria-label="关闭">✕</button>
+      </div>
+      <ul id="bookmarksList" class="list"></ul>
+      <p id="bookmarksEmpty" class="empty">暂无收藏。点击地址栏旁的星标即可收藏当前网页。</p>
+    </div>
+  </dialog>
+
+  <!-- Subtitle list modal -->
+  <dialog id="subtitleDialog" class="modal">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h2>字幕列表</h2>
+        <button class="icon-btn" id="subtitleClose" aria-label="关闭">✕</button>
+      </div>
+      <div id="subtitleList" class="subtitle-list"></div>
+      <p id="subtitleEmpty" class="empty">当前标签页没有字幕</p>
+    </div>
+  </dialog>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

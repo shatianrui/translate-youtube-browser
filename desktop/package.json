@@ -1,0 +1,70 @@
+{
+  "name": "translate-browser",
+  "productName": "译览",
+  "version": "1.0.0",
+  "description": "Windows 桌面浏览器 + YouTube 双语字幕翻译（ChatGPT / Claude / OpenRouter / Grok）",
+  "main": "main.js",
+  "author": "译览",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "test": "node scripts/test-core.mjs",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:win:ci": "electron-builder --win --publish never"
+  },
+  "build": {
+    "appId": "com.example.TranslateBrowser",
+    "productName": "译览",
+    "copyright": "Copyright © 译览",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "guest-preload.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "artifactName": "TranslateBrowser-${version}-${os}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "译览"
+    },
+    "portable": {
+      "artifactName": "TranslateBrowser-${version}-portable.${ext}"
+    }
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  }
+}
