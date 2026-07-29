@@ -409,9 +409,19 @@ async function extractAndTranslate(tab) {
     // ignore
   }
 
-  // Wait out pre-roll ads
+  // Wait a moment for overlay hooks to settle + wait out pre-roll ads
+  await new Promise((r) => setTimeout(r, 800));
+  if (token !== tab.extractionToken) return;
   await waitForAdsToFinish(tab.webview);
   if (token !== tab.extractionToken) return;
+
+  // Clear anything captured during ads
+  tab.pendingCapturedBody = null;
+  try {
+    await tab.webview.executeJavaScript('window.__tbClearCaptionCapture && window.__tbClearCaptionCapture()');
+  } catch {
+    // ignore
+  }
 
   let tracks = [];
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -438,12 +448,11 @@ async function extractAndTranslate(tab) {
   }
 
   if (token !== tab.extractionToken) return;
-  if (!tracks.length) {
-    setStatus(tab, '该视频没有可用字幕', 'error');
-    return;
-  }
 
-  const track = pickBestTrack(tracks, settings.targetLang);
+  // Even without a track list, player capture may still succeed if CC can be toggled.
+  const track = tracks.length
+    ? pickBestTrack(tracks, settings.targetLang)
+    : { baseUrl: '', languageCode: 'en', kind: null, name: null };
 
   try {
     try {
@@ -456,7 +465,7 @@ async function extractAndTranslate(tab) {
     tab.pendingCapturedBody = null;
     if (token !== tab.extractionToken) return;
     if (!subs.length) {
-      setStatus(tab, '字幕内容为空（可点刷新重试，或确认视频有字幕）', 'error');
+      setStatus(tab, '字幕获取被 YouTube 拦截，请点 ↻ 重试或先点开视频 CC 字幕', 'error');
       return;
     }
     tab.subtitles = subs;
@@ -491,7 +500,7 @@ function onURLChanged(tab, urlString) {
 function createWebview(isPrivate) {
   const webview = document.createElement('webview');
   webview.setAttribute('allowpopups', 'true');
-  webview.setAttribute('webpreferences', 'contextIsolation=yes, javascript=yes, webSecurity=yes');
+  webview.setAttribute('webpreferences', 'contextIsolation=no, javascript=yes, webSecurity=yes');
   if (guestPreloadPath) {
     webview.setAttribute('preload', guestPreloadPath);
   }
@@ -509,6 +518,14 @@ function wireWebview(tab) {
   const { webview } = tab;
 
   webview.addEventListener('dom-ready', async () => {
+    try {
+      await webview.executeJavaScript(BILINGUAL_OVERLAY_JS);
+    } catch {
+      // ignore
+    }
+  });
+  // Also inject on did-start-loading to hook fetch as early as possible for SPA navigations.
+  webview.addEventListener('did-finish-load', async () => {
     try {
       await webview.executeJavaScript(BILINGUAL_OVERLAY_JS);
     } catch {
