@@ -44,6 +44,10 @@ enum YouTubeAdBlock {
     /// Skip in-player ads and hide ad slots without touching the main video stream.
     static let skipAdsJS = """
     (function() {
+      var host = (location.hostname || '').toLowerCase();
+      if (host.indexOf('youtube.com') === -1 && host.indexOf('youtube-nocookie.com') === -1) {
+        return;
+      }
       if (window.__tbAdBlockInstalled) return;
       window.__tbAdBlockInstalled = true;
 

@@ -35,10 +35,13 @@ struct BrowserView: UIViewRepresentable {
             forMainFrameOnly: false
         ))
         config.userContentController = contentController
+        // Prefer desktop layout so www.youtube.com shows quality menu (with Safari UA below).
+        config.defaultWebpagePreferences.preferredContentMode = .desktop
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        // Desktop Chrome UA: full quality menu + classic watch player (better than mobile Shorts shell).
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        // Must look like real Safari/WebKit — a fake Chrome UA makes Google Sign-In show
+        // “此浏览器可能不安全 / This browser or app may not be secure”.
+        webView.customUserAgent = Self.safariDesktopUserAgent
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
@@ -66,6 +69,11 @@ struct BrowserView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    /// Desktop Safari UA matches WKWebView's WebKit engine (unlike Chrome UA) and still
+    /// unlocks the classic watch player / quality menu on www.youtube.com.
+    static let safariDesktopUserAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
 
     /// m.youtube → www; /shorts/ID → /watch?v=ID (full player: quality + captions).
     static func normalizedYouTubeURL(from raw: String) -> String? {
@@ -156,6 +164,81 @@ struct BrowserView: UIViewRepresentable {
                 return
             }
             decisionHandler(.allow)
+        }
+
+        /// Google Sign-In and many OAuth flows open a popup (`target=_blank`). Load it in-place.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+                webView.load(URLRequest(url: url))
+            }
+            return nil
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptAlertPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping () -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "好", style: .default) { _ in completionHandler() })
+            presentAlert(alert, from: webView) { completionHandler() }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completionHandler(false) })
+            alert.addAction(UIAlertAction(title: "好", style: .default) { _ in completionHandler(true) })
+            presentAlert(alert, from: webView) { completionHandler(false) }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptTextInputPanelWithPrompt prompt: String,
+            defaultText: String?,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (String?) -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+            alert.addTextField { $0.text = defaultText }
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completionHandler(nil) })
+            alert.addAction(UIAlertAction(title: "好", style: .default) { _ in
+                completionHandler(alert.textFields?.first?.text)
+            })
+            presentAlert(alert, from: webView) { completionHandler(nil) }
+        }
+
+        private func presentAlert(
+            _ alert: UIAlertController,
+            from webView: WKWebView,
+            onUnavailable: @escaping () -> Void
+        ) {
+            var responder: UIResponder? = webView
+            while let current = responder {
+                if let vc = current as? UIViewController {
+                    vc.present(alert, animated: true)
+                    return
+                }
+                responder = current.next
+            }
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            if let root = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController {
+                var top = root
+                while let presented = top.presentedViewController { top = presented }
+                top.present(alert, animated: true)
+                return
+            }
+            onUnavailable()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

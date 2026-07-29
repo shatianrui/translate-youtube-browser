@@ -54,6 +54,10 @@ enum SubtitleExtractor {
     /// player DOM, and reports SPA navigations back to Swift.
     static let bilingualOverlayJS = """
     (function() {
+      var host = (location.hostname || '').toLowerCase();
+      if (host.indexOf('youtube.com') === -1 && host.indexOf('youtube-nocookie.com') === -1 && host.indexOf('youtu.be') === -1) {
+        return;
+      }
       if (window.__tbInstalled) return;
       window.__tbInstalled = true;
       window.__tbSubs = [];
