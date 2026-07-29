@@ -116,13 +116,12 @@ export function parseCaptionBody(body) {
 }
 
 function captionURLCandidates(base) {
-  const withFmt = (fmt) => {
-    if (/[?&]fmt=[^&]*/.test(base)) {
-      return base.replace(/([?&])fmt=[^&]*/, `$1fmt=${fmt}`);
+  const withFmt = (url, fmt) => {
+    if (/[?&]fmt=[^&]*/.test(url)) {
+      return url.replace(/([?&])fmt=[^&]*/, `$1fmt=${fmt}`);
     }
-    return base + (base.includes('?') ? '&' : '?') + `fmt=${fmt}`;
+    return url + (url.includes('?') ? '&' : '?') + `fmt=${fmt}`;
   };
-  // Prefer json3; also try without pot/exp (sometimes helps on non-gated tracks).
   const stripped = base
     .replace(/([?&])pot=[^&]*/g, '$1')
     .replace(/([?&])exp=[^&]*/g, '$1')
@@ -171,7 +170,6 @@ async function fetchBodyViaMain(urlString, headers = {}) {
 }
 
 async function fetchBodyViaURLSession(urlString) {
-  // Prefer main-process fetch (no CORS). Fall back to renderer fetch.
   const viaMain = await fetchBodyViaMain(urlString, {
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -302,11 +300,13 @@ export async function fetchTracksViaInnerTube(videoID) {
       const tracks = await window.tbDesktop.fetchInnerTubeTracks(videoID);
       if (Array.isArray(tracks) && tracks.length) return tracks;
     } catch {
-      // fall through to local attempts
+      // fall through
     }
   }
 
   for (const c of INNERTUBE_CLIENTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
     try {
       const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
         method: 'POST',
@@ -324,13 +324,15 @@ export async function fetchTracksViaInnerTube(videoID) {
           contentCheckOk: true,
           racyCheckOk: true,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timer);
       if (!res.ok) continue;
       const root = await res.json();
       const tracks = root?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
       if (Array.isArray(tracks) && tracks.length) return tracks;
     } catch {
-      // try next client
+      clearTimeout(timer);
     }
   }
   return [];
@@ -350,21 +352,25 @@ function pickTrack(tracks, preferring) {
 }
 
 /**
- * Ask the page to enable captions so YouTube itself downloads timedtext (with PoToken),
- * then parse the intercepted body.
+ * Capture captions via the player's own PoToken-bearing timedtext download.
+ * Then re-fetch the captured URL with fmt=json3.
  */
-export async function fetchSubtitlesViaPlayerCapture(webview, preferLang = 'en') {
+export async function captureViaPlayer(webview, preferLang = 'en') {
   if (!webview) return [];
   try {
     const raw = await webview.executeJavaScript(
-      `window.__tbForceCaptionLoad && window.__tbForceCaptionLoad(${JSON.stringify(preferLang)})`,
+      `window.__tbRequestCaptions && window.__tbRequestCaptions(${JSON.stringify(preferLang)})`,
     );
     if (raw?.ok && raw.body) {
       const parsed = parseCaptionBody(raw.body);
       if (parsed.length) return parsed;
+      // Body was captured but maybe not json3 — re-fetch with fmt=json3
+      if (raw.url) {
+        const body = await fetchBodyViaWebView(raw.url, webview);
+        const parsed2 = parseCaptionBody(body || '');
+        if (parsed2.length) return parsed2;
+      }
     }
-    // If we intercepted a pot-bearing URL but body was empty, try fetching that URL again
-    // from the page (sometimes the first response races before pot is ready).
     if (raw?.lastUrl) {
       const body = await fetchBodyViaWebView(raw.lastUrl, webview);
       const parsed = parseCaptionBody(body || '');
@@ -396,36 +402,46 @@ export async function fetchSubtitlesViaTranscriptPanel(webview) {
   return [];
 }
 
-export async function fetchSubtitles(track, videoID, webview) {
-  // 1) Prefer capturing the player's own PoToken-authenticated timedtext download.
-  const captured = await fetchSubtitlesViaPlayerCapture(
-    webview,
-    track?.languageCode || 'en',
-  );
+/**
+ * New fetch strategy:
+ * 1. ANDROID_VR InnerTube first (avoids CC UI flicker)
+ * 2. Player-side capture via __tbRequestCaptions (pot-bearing timedtext)
+ * 3. Direct download of page track URL (last resort)
+ */
+export async function fetchSubtitles(track, videoID, webview, capturedBody = null) {
+  // 0) If we already have a captured body from the overlay hooks, try parsing it
+  if (capturedBody) {
+    const parsed = parseCaptionBody(capturedBody);
+    if (parsed.length) return parsed;
+  }
+
+  // 1) ANDROID_VR / InnerTube first (no CC flicker)
+  if (videoID) {
+    try {
+      const vrTracks = await fetchTracksViaInnerTube(videoID);
+      const preferred = pickTrack(vrTracks, track?.languageCode) || vrTracks[0];
+      if (preferred) {
+        const vrSubs = await downloadTrack(preferred, webview);
+        if (vrSubs.length) return vrSubs;
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  // 2) Player-side capture via __tbRequestCaptions
+  const captured = await captureViaPlayer(webview, track?.languageCode || 'en');
   if (captured.length) return captured;
 
-  // 2) Direct download of the page track (works when PoToken is not required).
+  // 3) Direct download of page track URL (last resort, often empty with PoToken)
   if (track?.baseUrl) {
     const pageSubs = await downloadTrack(track, webview);
     if (pageSubs.length) return pageSubs;
   }
 
-  // 3) Scrape YouTube's official transcript panel from the DOM.
+  // 4) Scrape transcript panel as final fallback
   const panelSubs = await fetchSubtitlesViaTranscriptPanel(webview);
   if (panelSubs.length) return panelSubs;
 
-  // 4) InnerTube alternate clients → download those caption URLs.
-  if (videoID) {
-    const vrTracks = await fetchTracksViaInnerTube(videoID);
-    const preferred = pickTrack(vrTracks, track?.languageCode) || vrTracks[0];
-    if (preferred) {
-      const vrSubs = await downloadTrack(preferred, webview);
-      if (vrSubs.length) return vrSubs;
-    }
-    for (const t of vrTracks) {
-      const subs = await downloadTrack(t, webview);
-      if (subs.length) return subs;
-    }
-  }
   return [];
 }

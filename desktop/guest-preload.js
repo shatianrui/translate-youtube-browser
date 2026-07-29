@@ -15,7 +15,7 @@ window.__tbPost = function tbPost(name, payload) {
 // Also expose a webkit-compatible shim so the shared overlay script can stay close to iOS.
 window.webkit = window.webkit || {};
 window.webkit.messageHandlers = window.webkit.messageHandlers || {};
-['tbUrlChanged', 'tbActiveIndex'].forEach((name) => {
+['tbUrlChanged', 'tbActiveIndex', 'tbCaptionBody'].forEach((name) => {
   window.webkit.messageHandlers[name] = {
     postMessage(payload) {
       window.__tbPost(name, payload);
