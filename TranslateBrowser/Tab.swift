@@ -145,10 +145,10 @@ final class Tab: ObservableObject, Identifiable {
             }
         }
 
-        // Page tracks missing (or still loading): resolve via InnerTube ANDROID_VR.
+        // Page tracks missing (or still loading): resolve via InnerTube fallback clients.
         if tracks.isEmpty, let videoID {
             statusMessage = "正在通过备用通道获取字幕轨…"
-            tracks = (try? await SubtitleExtractor.fetchTracksViaAndroidVR(videoID: videoID)) ?? []
+            tracks = (try? await SubtitleExtractor.fetchTracksWithFallbacks(videoID: videoID)) ?? []
         }
 
         guard !tracks.isEmpty else {
