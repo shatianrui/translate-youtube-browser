@@ -6,9 +6,8 @@ const store = new Store({
   name: 'translate-browser',
   defaults: {
     provider: 'ChatGPT (OpenAI)',
-    apiKey: '',
-    model: '',
     targetLang: '中文',
+    credentials: {},
     bookmarks: [],
     windowBounds: { width: 1280, height: 840 },
   },
@@ -53,7 +52,6 @@ function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    // Let the renderer decide how to open links; deny OS popup by default.
     if (url.startsWith('http')) {
       mainWindow?.webContents.send('open-external-url', url);
     }
@@ -151,17 +149,20 @@ app.on('window-all-closed', () => {
 
 ipcMain.handle('settings:get', () => ({
   provider: store.get('provider'),
-  apiKey: store.get('apiKey'),
-  model: store.get('model'),
   targetLang: store.get('targetLang'),
+  credentials: store.get('credentials') || {},
+  // Legacy migration: pass these through if they exist
+  ...(store.get('apiKey') ? { apiKey: store.get('apiKey'), model: store.get('model') } : {}),
 }));
 
 ipcMain.handle('settings:set', (_event, patch) => {
-  const allowed = ['provider', 'apiKey', 'model', 'targetLang'];
-  for (const key of allowed) {
-    if (Object.prototype.hasOwnProperty.call(patch, key)) {
-      store.set(key, patch[key]);
-    }
+  if (patch.provider != null) store.set('provider', patch.provider);
+  if (patch.targetLang != null) store.set('targetLang', patch.targetLang);
+  if (patch.credentials != null) store.set('credentials', patch.credentials);
+  // Clean up legacy keys on migration
+  if (patch.credentials && store.has('apiKey')) {
+    store.delete('apiKey');
+    store.delete('model');
   }
   return true;
 });
@@ -265,6 +266,8 @@ ipcMain.handle('net:fetchInnerTubeTracks', async (_event, videoID) => {
   }
   for (const c of INNERTUBE_CLIENTS) {
     try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
       const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
         method: 'POST',
         headers: {
@@ -281,7 +284,9 @@ ipcMain.handle('net:fetchInnerTubeTracks', async (_event, videoID) => {
           contentCheckOk: true,
           racyCheckOk: true,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timer);
       if (!res.ok) continue;
       const root = await res.json();
       const tracks = root?.captions?.playerCaptionsTracklistRenderer?.captionTracks;

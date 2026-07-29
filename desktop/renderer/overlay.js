@@ -1,11 +1,14 @@
 /**
- * Injected into YouTube pages: bilingual caption overlay + SPA navigation hooks.
+ * Injected into YouTube pages: bilingual caption overlay with PoToken capture,
+ * ad detection, rAF sync loop, and SPA navigation hooks.
  */
 export const BILINGUAL_OVERLAY_JS = `
 (function() {
-  if (window.__tbInstalled && window.__tbForceCaptionLoad) return;
+  if (window.__tbInstalled && window.__tbRequestCaptions) return;
   window.__tbInstalled = true;
   window.__tbSubs = window.__tbSubs || [];
+
+  var SYNC_LEAD = 0.06;
 
   function post(name, payload) {
     try {
@@ -15,6 +18,9 @@ export const BILINGUAL_OVERLAY_JS = `
       }
     } catch (e) {}
   }
+
+  // Skip non-YouTube pages
+  if (!/youtube\\.com|youtu\\.be/.test(location.hostname)) return;
 
   function notifyURL() { post('tbUrlChanged', location.href); }
   ['yt-navigate-finish', 'yt-page-data-updated', 'yt-navigate-start'].forEach(function(evt) {
@@ -27,127 +33,25 @@ export const BILINGUAL_OVERLAY_JS = `
   var _rs = history.replaceState;
   history.replaceState = function() { var r = _rs.apply(this, arguments); setTimeout(notifyURL, 0); return r; };
 
-  var style = document.createElement('style');
-  style.textContent = [
-    '.ytp-caption-window-container{display:none !important;}',
-    '#tb-bilingual-caption{position:absolute;left:50%;bottom:9%;transform:translateX(-50%);',
-    'max-width:min(92%,720px);z-index:2147483647;pointer-events:none;text-align:center;',
-    'font-family:Segoe UI,system-ui,-apple-system,sans-serif;}',
-    '#tb-caption-orig{color:rgba(255,255,255,0.82);font-size:clamp(12px,2.1vw,15px);',
-    'line-height:1.35;text-shadow:0 1px 3px rgba(0,0,0,0.95);margin-bottom:4px;white-space:pre-wrap;}',
-    '#tb-caption-trans{color:#fff;font-size:clamp(16px,3vw,22px);font-weight:600;line-height:1.35;',
-    'text-shadow:0 1px 4px rgba(0,0,0,0.95);background:rgba(0,0,0,0.45);border-radius:8px;',
-    'padding:5px 12px;display:none;white-space:pre-wrap;}'
-  ].join('');
-  (document.documentElement || document.head || document.body).appendChild(style);
+  // ---- PoToken capture: hook fetch & XHR ----
+  window.__tbCapturedBody = null;
+  window.__tbCapturedURL = null;
 
-  function findPlayerContainer() {
-    return document.getElementById('movie_player')
-      || document.querySelector('.html5-video-player')
-      || document.querySelector('#player')
-      || document.querySelector('ytd-player');
+  function isAdPlaying() {
+    var player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+    if (!player) return false;
+    var cls = player.className || '';
+    return cls.indexOf('ad-showing') >= 0 || cls.indexOf('ad-interrupting') >= 0;
   }
-  function findVideo(container) {
-    return (container && container.querySelector('video')) || document.querySelector('video');
-  }
-  function ensureOverlay() {
-    var container = findPlayerContainer();
-    if (!container) return null;
-    var host = container.classList && container.classList.contains('html5-video-player')
-      ? container
-      : (container.querySelector('.html5-video-player') || container);
-    var el = document.getElementById('tb-bilingual-caption');
-    if (el && el.parentElement === host) return el;
-    if (el) el.remove();
-    el = document.createElement('div');
-    el.id = 'tb-bilingual-caption';
-    el.style.display = 'none';
-    var orig = document.createElement('div');
-    orig.id = 'tb-caption-orig';
-    var trans = document.createElement('div');
-    trans.id = 'tb-caption-trans';
-    el.appendChild(orig);
-    el.appendChild(trans);
-    if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
-    host.appendChild(el);
-    return el;
-  }
-  function findCue(t) {
-    var subs = window.__tbSubs;
-    var best = -1;
-    for (var i = 0; i < subs.length; i++) {
-      var s = subs[i];
-      var end = s.s + Math.max(s.d || 0, 0.05);
-      if (t >= s.s && t <= end + 0.15) return i;
-      if (t >= s.s) best = i;
-      if (s.s > t) break;
-    }
-    if (best >= 0) {
-      var b = subs[best];
-      var bEnd = b.s + Math.max(b.d || 0, 0.8);
-      if (t <= bEnd + 0.35) return best;
-    }
-    return -1;
-  }
-  var lastIndex = -2;
-  function tick() {
-    var container = findPlayerContainer();
-    var video = findVideo(container);
-    var overlay = ensureOverlay();
-    if (!video || !overlay) return;
-    var idx = window.__tbSubs.length ? findCue(video.currentTime) : -1;
-    if (idx === lastIndex) return;
-    lastIndex = idx;
-    var origEl = overlay.querySelector('#tb-caption-orig');
-    var transEl = overlay.querySelector('#tb-caption-trans');
-    if (idx < 0) {
-      overlay.style.display = 'none';
-    } else {
-      var s = window.__tbSubs[idx];
-      origEl.textContent = s.o || '';
-      if (s.t) { transEl.textContent = s.t; transEl.style.display = 'inline-block'; }
-      else { transEl.textContent = ''; transEl.style.display = 'none'; }
-      overlay.style.display = (s.o || s.t) ? 'block' : 'none';
-    }
-    post('tbActiveIndex', idx);
-  }
-  document.addEventListener('timeupdate', function(e) {
-    if (e.target && e.target.tagName === 'VIDEO') tick();
-  }, true);
-  document.addEventListener('seeked', function(e) {
-    if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; tick(); }
-  }, true);
-  setInterval(tick, 250);
-
-  window.__tbSetSubtitles = function(subs) {
-    window.__tbSubs = Array.isArray(subs) ? subs : [];
-    lastIndex = -2;
-    tick();
-  };
-  window.__tbClearSubtitles = function() {
-    window.__tbSubs = [];
-    lastIndex = -2;
-    var overlay = document.getElementById('tb-bilingual-caption');
-    if (overlay) overlay.style.display = 'none';
-  };
-
-  // ---- PoToken workaround: intercept the player's own timedtext fetches ----
-  // YouTube's WEB caption URLs often include exp=xpe and need a BotGuard PoToken.
-  // Direct fetches return HTTP 200 with an empty body. The real player mints pot
-  // and downloads captions itself — we capture that response.
-  window.__tbCapturedCaptions = null;
-  window.__tbLastTimedtextUrl = null;
 
   function maybeCapture(url, body) {
     try {
       if (!url || !/\\/api\\/timedtext/i.test(String(url))) return;
-      window.__tbLastTimedtextUrl = String(url);
+      if (isAdPlaying()) return;
+      window.__tbCapturedURL = String(url);
       if (!body || !String(body).trim()) return;
-      window.__tbCapturedCaptions = {
-        url: String(url),
-        body: String(body),
-        at: Date.now(),
-      };
+      window.__tbCapturedBody = String(body);
+      post('tbCaptionBody', { url: window.__tbCapturedURL, body: window.__tbCapturedBody });
     } catch (e) {}
   }
 
@@ -194,6 +98,154 @@ export const BILINGUAL_OVERLAY_JS = `
     return new Promise(function(resolve) { setTimeout(resolve, ms); });
   }
 
+  // ---- Caption positioning: use YouTube native container ----
+  var style = document.createElement('style');
+  style.textContent = [
+    '.ytp-caption-window-container .captions-text *{color:transparent !important;-webkit-text-stroke:0 !important;text-shadow:none !important;font-size:0 !important;line-height:0 !important;}',
+    '.ytp-caption-window-container .ytp-caption-segment{display:none !important;}',
+    '#tb-caption-window{position:absolute;left:50%;bottom:2%;transform:translateX(-50%);',
+    'max-width:min(92%,720px);z-index:2147483647;pointer-events:none;text-align:center;',
+    'font-family:Segoe UI,system-ui,-apple-system,sans-serif;}',
+    '#tb-caption-orig{color:rgba(255,255,255,0.82);font-size:clamp(12px,2.1vw,15px);',
+    'line-height:1.35;text-shadow:0 1px 3px rgba(0,0,0,0.95);margin-bottom:4px;white-space:pre-wrap;}',
+    '#tb-caption-trans{color:#fff;font-size:clamp(16px,3vw,22px);font-weight:600;line-height:1.35;',
+    'text-shadow:0 1px 4px rgba(0,0,0,0.95);background:rgba(0,0,0,0.45);border-radius:8px;',
+    'padding:5px 12px;display:none;white-space:pre-wrap;}'
+  ].join('\\n');
+  (document.documentElement || document.head || document.body).appendChild(style);
+
+  function findPlayerContainer() {
+    return document.getElementById('movie_player')
+      || document.querySelector('.html5-video-player')
+      || document.getElementById('player')
+      || document.querySelector('ytd-player');
+  }
+  function findVideo(container) {
+    return (container && container.querySelector('video')) || document.querySelector('video');
+  }
+
+  function getPlayerAPI() {
+    var el = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+    if (el && typeof el.getCurrentTime === 'function') return el;
+    return null;
+  }
+
+  function mediaTime() {
+    var api = getPlayerAPI();
+    if (api) try { return api.getCurrentTime(); } catch(e) {}
+    var v = findVideo(findPlayerContainer());
+    return v ? v.currentTime : 0;
+  }
+
+  function ensureOverlay() {
+    var container = findPlayerContainer();
+    if (!container) return null;
+    var captionContainer = container.querySelector('.ytp-caption-window-container');
+    if (!captionContainer) {
+      var host = container.classList && container.classList.contains('html5-video-player')
+        ? container
+        : (container.querySelector('.html5-video-player') || container);
+      captionContainer = host;
+    }
+    var el = document.getElementById('tb-caption-window');
+    if (el && el.parentElement === captionContainer) return el;
+    if (el) el.remove();
+    el = document.createElement('div');
+    el.id = 'tb-caption-window';
+    el.style.display = 'none';
+    var orig = document.createElement('div');
+    orig.id = 'tb-caption-orig';
+    var trans = document.createElement('div');
+    trans.id = 'tb-caption-trans';
+    el.appendChild(orig);
+    el.appendChild(trans);
+    if (getComputedStyle(captionContainer).position === 'static') captionContainer.style.position = 'relative';
+    captionContainer.appendChild(el);
+    return el;
+  }
+
+  function findCue(t) {
+    var subs = window.__tbSubs;
+    if (!subs.length) return -1;
+    var lo = 0, hi = subs.length - 1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >>> 1;
+      if (subs[mid].s > t - SYNC_LEAD) hi = mid - 1;
+      else lo = mid + 1;
+    }
+    var idx = hi;
+    if (idx < 0) return -1;
+    var cue = subs[idx];
+    var end = (cue.e != null) ? cue.e : (cue.s + Math.max(cue.d || 0, 0.05));
+    if (t >= cue.s - SYNC_LEAD && t < end) return idx;
+    return -1;
+  }
+
+  var lastIndex = -2;
+  function tick() {
+    if (isAdPlaying()) {
+      if (lastIndex !== -1) {
+        lastIndex = -1;
+        var ov = document.getElementById('tb-caption-window');
+        if (ov) ov.style.display = 'none';
+      }
+      return;
+    }
+    var overlay = ensureOverlay();
+    if (!overlay) return;
+    var t = mediaTime();
+    var idx = window.__tbSubs.length ? findCue(t) : -1;
+    if (idx === lastIndex) return;
+    lastIndex = idx;
+    var origEl = overlay.querySelector('#tb-caption-orig');
+    var transEl = overlay.querySelector('#tb-caption-trans');
+    if (idx < 0) {
+      overlay.style.display = 'none';
+    } else {
+      var s = window.__tbSubs[idx];
+      origEl.textContent = s.o || '';
+      if (s.t) { transEl.textContent = s.t; transEl.style.display = 'inline-block'; }
+      else { transEl.textContent = ''; transEl.style.display = 'none'; }
+      overlay.style.display = (s.o || s.t) ? 'block' : 'none';
+    }
+    post('tbActiveIndex', idx);
+  }
+
+  // rAF loop for tight A/V sync
+  var rafId = 0;
+  function rafLoop() {
+    tick();
+    rafId = requestAnimationFrame(rafLoop);
+  }
+  rafId = requestAnimationFrame(rafLoop);
+
+  document.addEventListener('seeked', function(e) {
+    if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; tick(); }
+  }, true);
+
+  window.__tbSetSubtitles = function(subs) {
+    var arr = Array.isArray(subs) ? subs : [];
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i].e == null && i + 1 < arr.length) {
+        var rawEnd = arr[i].s + Math.max(arr[i].d || 0, 0.05);
+        arr[i].e = Math.min(rawEnd, arr[i + 1].s);
+      }
+      if (arr[i].e == null) {
+        arr[i].e = arr[i].s + Math.max(arr[i].d || 0, 2.0);
+      }
+    }
+    window.__tbSubs = arr;
+    lastIndex = -2;
+    tick();
+  };
+  window.__tbClearSubtitles = function() {
+    window.__tbSubs = [];
+    lastIndex = -2;
+    var overlay = document.getElementById('tb-caption-window');
+    if (overlay) overlay.style.display = 'none';
+  };
+
+  // ---- __tbRequestCaptions: enable native CC, wait for captured body ----
   function pickPlayerTrack(preferLang) {
     var player = findPlayerContainer();
     var host = player && (player.querySelector && player.querySelector('.html5-video-player') || player);
@@ -211,8 +263,14 @@ export const BILINGUAL_OVERLAY_JS = `
     }) || list[0];
   }
 
-  window.__tbForceCaptionLoad = async function(preferLang) {
-    window.__tbCapturedCaptions = null;
+  window.__tbClearCaptionCapture = function() {
+    window.__tbCapturedBody = null;
+    window.__tbCapturedURL = null;
+  };
+
+  window.__tbRequestCaptions = async function(preferLang) {
+    window.__tbCapturedBody = null;
+    window.__tbCapturedURL = null;
     var player = findPlayerContainer();
     var host = player && ((player.classList && player.classList.contains('html5-video-player'))
       ? player
@@ -234,19 +292,31 @@ export const BILINGUAL_OVERLAY_JS = `
 
     var deadline = Date.now() + 9000;
     while (Date.now() < deadline) {
-      if (window.__tbCapturedCaptions && window.__tbCapturedCaptions.body) {
+      if (window.__tbCapturedBody) {
+        // Turn CC back off
+        try {
+          var ccBtn = document.querySelector('.ytp-subtitles-button');
+          if (ccBtn && ccBtn.getAttribute('aria-pressed') === 'true') ccBtn.click();
+        } catch(e) {}
         return {
           ok: true,
-          body: window.__tbCapturedCaptions.body,
-          url: window.__tbCapturedCaptions.url,
+          body: window.__tbCapturedBody,
+          url: window.__tbCapturedURL,
         };
       }
       await sleep(200);
     }
+
+    // Turn CC back off
+    try {
+      var ccBtn2 = document.querySelector('.ytp-subtitles-button');
+      if (ccBtn2 && ccBtn2.getAttribute('aria-pressed') === 'true') ccBtn2.click();
+    } catch(e) {}
+
     return {
       ok: false,
       reason: 'timeout',
-      lastUrl: window.__tbLastTimedtextUrl || null,
+      lastUrl: window.__tbCapturedURL || null,
     };
   };
 
@@ -256,12 +326,11 @@ export const BILINGUAL_OVERLAY_JS = `
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
         var label = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).toLowerCase();
-        if (/show transcript|transcript|显示文字稿|打开文字稿|文字稿|字幕/.test(label)
-            && /transcript|文字稿/.test(label)) {
+        if (/show transcript|transcript/.test(label) && /transcript/.test(label)) {
           return el;
         }
       }
-      return document.querySelector('button[aria-label*="transcript" i], button[aria-label*="文字稿"]');
+      return document.querySelector('button[aria-label*="transcript" i]');
     }
 
     var btn = findTranscriptButton();
@@ -274,7 +343,6 @@ export const BILINGUAL_OVERLAY_JS = `
       'ytd-transcript-segment-renderer, ytd-transcript-body-renderer ytd-transcript-segment-renderer'
     );
     if (!segments.length) {
-      // Expand description "show more" then retry once.
       var more = document.querySelector('tp-yt-paper-button#expand, #expand');
       if (more) {
         try { more.click(); } catch (e) {}
@@ -338,6 +406,16 @@ export const CAPTION_TRACKS_JS = `
       var pr = fromPlayer(players[j]);
       if (pr) return pr;
     }
+    // Also check shorts-player and active reel
+    var shorts = document.getElementById('shorts-player');
+    if (shorts) {
+      var sr = fromPlayer(shorts);
+      if (sr) return sr;
+      var nested2 = shorts.querySelector && shorts.querySelector('.html5-video-player');
+      if (nested2) { var sr2 = fromPlayer(nested2); if (sr2) return sr2; }
+    }
+    var reel = document.querySelector('ytd-reel-video-renderer[is-active] .html5-video-player');
+    if (reel) { var rr = fromPlayer(reel); if (rr) return rr; }
     return null;
   }
   var pr = liveResponse();

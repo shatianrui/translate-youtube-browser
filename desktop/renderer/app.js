@@ -1,6 +1,6 @@
 import { BILINGUAL_OVERLAY_JS, CAPTION_TRACKS_JS } from './overlay.js';
 import { fetchSubtitles, fetchTracksViaAndroidVR } from './subtitle.js';
-import { PROVIDERS, translateTexts } from './translation.js';
+import { PROVIDERS, translateTexts, translateLive } from './translation.js';
 
 const DEFAULT_URL = 'https://www.youtube.com';
 const SEARCH_PREFIX = 'https://www.google.com/search?q=';
@@ -40,13 +40,27 @@ const els = {
   subtitleClose: document.getElementById('subtitleClose'),
 };
 
-/** @type {{ provider: string, apiKey: string, model: string, targetLang: string }} */
+/**
+ * Per-provider credentials: { provider, targetLang, credentials: { [storeKey]: { apiKey, model } } }
+ * @type {{ provider: string, targetLang: string, credentials: Record<string, {apiKey: string, model: string}> }}
+ */
 let settings = {
   provider: 'ChatGPT (OpenAI)',
-  apiKey: '',
-  model: '',
   targetLang: '中文',
+  credentials: {},
 };
+
+function currentApiKey() {
+  const meta = PROVIDERS[settings.provider];
+  const key = meta?.storeKey || 'openai';
+  return settings.credentials[key]?.apiKey || '';
+}
+
+function currentModel() {
+  const meta = PROVIDERS[settings.provider];
+  const key = meta?.storeKey || 'openai';
+  return settings.credentials[key]?.model || '';
+}
 
 /** @type {{ id: string, title: string, urlString: string }[]} */
 let bookmarks = [];
@@ -72,6 +86,9 @@ let activeTabId = null;
  * @property {boolean} isTranslating
  * @property {string|null} lastLoadedVideoID
  * @property {number} extractionToken
+ * @property {number} translationEpoch
+ * @property {Set<number>} translatingIndices
+ * @property {string|null} pendingCapturedBody
  * @property {HTMLElement} webview
  */
 
@@ -182,12 +199,18 @@ function pickBestTrack(tracks, targetLang) {
 }
 
 async function pushSubtitlesToPage(tab) {
-  const payload = tab.subtitles.map((s) => ({
-    s: s.start,
-    d: s.duration,
-    o: s.text,
-    t: s.translation || '',
-  }));
+  const payload = tab.subtitles.map((s, i) => {
+    const nextStart = (i + 1 < tab.subtitles.length) ? tab.subtitles[i + 1].start : null;
+    const rawEnd = s.start + Math.max(s.duration, 0.05);
+    const e = nextStart != null ? Math.min(rawEnd, nextStart) : rawEnd;
+    return {
+      s: s.start,
+      d: s.duration,
+      e,
+      o: s.text,
+      t: s.translation || '',
+    };
+  });
   const json = JSON.stringify(payload);
   try {
     await tab.webview.executeJavaScript(
@@ -200,9 +223,12 @@ async function pushSubtitlesToPage(tab) {
 
 async function clearSubtitleState(tab) {
   tab.extractionToken += 1;
+  tab.translationEpoch += 1;
   tab.subtitles = [];
   tab.currentIndex = null;
   tab.lastLoadedVideoID = null;
+  tab.translatingIndices = new Set();
+  tab.pendingCapturedBody = null;
   setStatus(tab, '');
   try {
     await tab.webview.executeJavaScript('window.__tbClearSubtitles && window.__tbClearSubtitles()');
@@ -211,33 +237,136 @@ async function clearSubtitleState(tab) {
   }
 }
 
+// ---- Realtime cue translation ----
+
+async function translateRealtimeCues(tab, startIdx) {
+  const apiKey = currentApiKey();
+  if (!apiKey || !tab.subtitles.length) return;
+  const epoch = tab.translationEpoch;
+
+  const count = Math.min(2, tab.subtitles.length - startIdx);
+  if (count <= 0) return;
+
+  const indices = [];
+  for (let i = startIdx; i < startIdx + count; i++) {
+    if (i >= tab.subtitles.length) break;
+    if (tab.subtitles[i].translation) continue;
+    if (tab.translatingIndices.has(i)) continue;
+    indices.push(i);
+  }
+  if (!indices.length) return;
+
+  for (const i of indices) tab.translatingIndices.add(i);
+
+  try {
+    const texts = indices.map((i) => tab.subtitles[i].text);
+    const translated = await translateLive({
+      provider: settings.provider,
+      apiKey,
+      model: currentModel(),
+      texts,
+      targetLang: settings.targetLang,
+    });
+    if (epoch !== tab.translationEpoch) return;
+    for (let j = 0; j < indices.length; j++) {
+      const idx = indices[j];
+      if (idx < tab.subtitles.length && !tab.subtitles[idx].translation) {
+        tab.subtitles[idx].translation = translated[j] || '';
+      }
+    }
+    await pushSubtitlesToPage(tab);
+  } catch {
+    // silently fail for realtime
+  } finally {
+    for (const i of indices) tab.translatingIndices.delete(i);
+  }
+}
+
+async function prefetchTranslations(tab, currentIdx) {
+  const apiKey = currentApiKey();
+  if (!apiKey || !tab.subtitles.length) return;
+  const epoch = tab.translationEpoch;
+
+  const WINDOW_SIZE = 20;
+  const MAX_SECONDS = 75;
+  const startTime = tab.subtitles[currentIdx]?.start ?? 0;
+  const endIdx = Math.min(currentIdx + WINDOW_SIZE, tab.subtitles.length);
+
+  const needTranslation = [];
+  for (let i = currentIdx; i < endIdx; i++) {
+    if (tab.subtitles[i].start - startTime > MAX_SECONDS) break;
+    if (tab.subtitles[i].translation) continue;
+    if (tab.translatingIndices.has(i)) continue;
+    needTranslation.push(i);
+  }
+  if (!needTranslation.length) return;
+
+  const chunkSize = 20;
+  for (let c = 0; c < needTranslation.length; c += chunkSize) {
+    if (epoch !== tab.translationEpoch) return;
+    const chunk = needTranslation.slice(c, c + chunkSize);
+    for (const i of chunk) tab.translatingIndices.add(i);
+
+    try {
+      const texts = chunk.map((i) => tab.subtitles[i].text);
+      const translated = await translateTexts({
+        provider: settings.provider,
+        apiKey,
+        model: currentModel(),
+        texts,
+        targetLang: settings.targetLang,
+      });
+      if (epoch !== tab.translationEpoch) return;
+      for (let j = 0; j < chunk.length; j++) {
+        const idx = chunk[j];
+        if (idx < tab.subtitles.length && !tab.subtitles[idx].translation) {
+          tab.subtitles[idx].translation = translated[j] || '';
+        }
+      }
+      await pushSubtitlesToPage(tab);
+    } catch {
+      // continue
+    } finally {
+      for (const i of chunk) tab.translatingIndices.delete(i);
+    }
+  }
+}
+
 async function translateAll(tab) {
-  if (!settings.apiKey) {
+  const apiKey = currentApiKey();
+  if (!apiKey) {
     setStatus(tab, `请在设置中填写 ${settings.provider} 的 API Key`, 'error');
     openSettings();
     return;
   }
   if (!tab.subtitles.length) return;
+
+  // Clear existing translations and restart
+  for (const sub of tab.subtitles) sub.translation = null;
+  tab.translationEpoch += 1;
+  tab.translatingIndices = new Set();
   tab.isTranslating = true;
   els.btnRetranslate.disabled = true;
+
+  const epoch = tab.translationEpoch;
   try {
     const chunkSize = 20;
     for (let start = 0; start < tab.subtitles.length; start += chunkSize) {
+      if (epoch !== tab.translationEpoch) return;
       const end = Math.min(start + chunkSize, tab.subtitles.length);
       const texts = tab.subtitles.slice(start, end).map((s) => s.text);
-      setStatus(tab, `正在翻译 ${end}/${tab.subtitles.length}…`, 'busy');
       const translated = await translateTexts({
         provider: settings.provider,
-        apiKey: settings.apiKey,
-        model: settings.model,
+        apiKey,
+        model: currentModel(),
         texts,
         targetLang: settings.targetLang,
       });
+      if (epoch !== tab.translationEpoch) return;
       for (let i = start; i < end; i++) {
         tab.subtitles[i].translation = translated[i - start] || '';
       }
       await pushSubtitlesToPage(tab);
-      setStatus(tab, `已翻译 ${end}/${tab.subtitles.length}`, 'busy');
     }
     setStatus(tab, `翻译完成（${settings.provider}）`);
   } catch (err) {
@@ -248,17 +377,41 @@ async function translateAll(tab) {
   }
 }
 
+async function waitForAdsToFinish(webview) {
+  for (let i = 0; i < 60; i++) {
+    try {
+      const adPlaying = await webview.executeJavaScript(`
+        (function() {
+          var p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+          if (!p) return false;
+          var cls = p.className || '';
+          return cls.indexOf('ad-showing') >= 0 || cls.indexOf('ad-interrupting') >= 0;
+        })()
+      `);
+      if (!adPlaying) return;
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 async function extractAndTranslate(tab) {
   const token = ++tab.extractionToken;
+  tab.translationEpoch += 1;
   const videoID = tab.lastLoadedVideoID;
-  setStatus(tab, '正在获取字幕…', 'busy');
   tab.subtitles = [];
   tab.currentIndex = null;
+  tab.translatingIndices = new Set();
   try {
     await tab.webview.executeJavaScript('window.__tbClearSubtitles && window.__tbClearSubtitles()');
   } catch {
     // ignore
   }
+
+  // Wait out pre-roll ads
+  await waitForAdsToFinish(tab.webview);
+  if (token !== tab.extractionToken) return;
 
   let tracks = [];
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -277,7 +430,6 @@ async function extractAndTranslate(tab) {
   }
 
   if (!tracks.length && videoID) {
-    setStatus(tab, '正在通过备用通道获取字幕轨…', 'busy');
     try {
       tracks = await fetchTracksViaAndroidVR(videoID);
     } catch {
@@ -292,27 +444,25 @@ async function extractAndTranslate(tab) {
   }
 
   const track = pickBestTrack(tracks, settings.targetLang);
-  setStatus(tab, `正在下载字幕（${track.languageCode || '?'}）…`, 'busy');
 
   try {
-    // Ensure PoToken interceptors / player helpers are present (idempotent).
     try {
       await tab.webview.executeJavaScript(BILINGUAL_OVERLAY_JS);
     } catch {
       // ignore
     }
 
-    setStatus(tab, '正在通过播放器通道获取字幕…', 'busy');
-    const subs = await fetchSubtitles(track, videoID, tab.webview);
+    const subs = await fetchSubtitles(track, videoID, tab.webview, tab.pendingCapturedBody);
+    tab.pendingCapturedBody = null;
     if (token !== tab.extractionToken) return;
     if (!subs.length) {
       setStatus(tab, '字幕内容为空（可点刷新重试，或确认视频有字幕）', 'error');
       return;
     }
     tab.subtitles = subs;
-    setStatus(tab, `已提取 ${subs.length} 条字幕，开始翻译…`, 'busy');
     await pushSubtitlesToPage(tab);
-    await translateAll(tab);
+    setStatus(tab, '');
+    // Realtime translation starts via tbActiveIndex events
   } catch (err) {
     if (token !== tab.extractionToken) return;
     setStatus(tab, `字幕获取失败: ${err.message || err}`, 'error');
@@ -343,10 +493,8 @@ function createWebview(isPrivate) {
   webview.setAttribute('allowpopups', 'true');
   webview.setAttribute('webpreferences', 'contextIsolation=yes, javascript=yes, webSecurity=yes');
   if (guestPreloadPath) {
-    // Absolute path (not file://) — Electron resolves webview preload this way on Windows/Linux.
     webview.setAttribute('preload', guestPreloadPath);
   }
-  // Private tabs use a non-persistent partition so cookies/cache die with the tab.
   webview.setAttribute(
     'partition',
     isPrivate
@@ -397,7 +545,6 @@ function wireWebview(tab) {
     if (tab.id === activeTabId) syncChrome();
   });
 
-  // Approximate progress via Electron events when available.
   webview.addEventListener('did-get-response-details', () => {
     if (tab.estimatedProgress < 0.7) tab.estimatedProgress = 0.55;
     if (tab.id === activeTabId) syncChrome();
@@ -411,6 +558,17 @@ function wireWebview(tab) {
       const idx = Array.isArray(e.args) ? e.args[0] : e.args;
       tab.currentIndex = typeof idx === 'number' && idx >= 0 ? idx : null;
       if (els.subtitleDialog.open) renderSubtitleList(tab);
+
+      // Realtime translation: translate current + next 1-2 cues immediately
+      if (typeof idx === 'number' && idx >= 0 && tab.subtitles.length) {
+        translateRealtimeCues(tab, idx);
+        prefetchTranslations(tab, idx);
+      }
+    } else if (e.channel === 'tbCaptionBody') {
+      const data = Array.isArray(e.args) ? e.args[0] : e.args;
+      if (data && data.body) {
+        tab.pendingCapturedBody = data.body;
+      }
     }
   });
 
@@ -460,7 +618,6 @@ function syncChrome() {
 
   setStatus(tab, tab.statusMessage, tab.isTranslating ? 'busy' : '');
 
-  // Refresh nav capability from webview if available.
   try {
     tab.canGoBack = webviewCan(tab.webview, 'canGoBack');
     tab.canGoForward = webviewCan(tab.webview, 'canGoForward');
@@ -505,6 +662,9 @@ function newTab(urlString = DEFAULT_URL, isPrivate = false) {
     isTranslating: false,
     lastLoadedVideoID: null,
     extractionToken: 0,
+    translationEpoch: 0,
+    translatingIndices: new Set(),
+    pendingCapturedBody: null,
     webview,
   };
   tabs.set(id, tab);
@@ -518,6 +678,7 @@ function closeTab(id) {
   const tab = tabs.get(id);
   if (!tab) return;
   tab.extractionToken += 1;
+  tab.translationEpoch += 1;
   tab.webview.remove();
   tabs.delete(id);
   if (!tabs.size) {
@@ -635,12 +796,42 @@ function openSettings() {
     els.settingProvider.appendChild(opt);
   }
   els.settingProvider.value = settings.provider;
-  els.settingApiKey.value = settings.apiKey;
-  els.settingApiKey.placeholder = PROVIDERS[settings.provider]?.placeholder || 'sk-...';
-  els.settingModel.value = settings.model;
-  els.settingModel.placeholder = `默认 ${PROVIDERS[settings.provider]?.defaultModel || ''}`;
+
+  const meta = PROVIDERS[settings.provider];
+  const key = meta?.storeKey || 'openai';
+  const cred = settings.credentials[key] || {};
+  els.settingApiKey.value = cred.apiKey || '';
+  els.settingApiKey.placeholder = meta?.placeholder || 'sk-...';
+  els.settingModel.value = cred.model || '';
+  els.settingModel.placeholder = `默认 ${meta?.defaultModel || ''}`;
   els.settingTargetLang.value = settings.targetLang;
   els.settingsDialog.showModal();
+}
+
+function onProviderChange() {
+  const providerName = els.settingProvider.value;
+  const meta = PROVIDERS[providerName];
+  const key = meta?.storeKey || 'openai';
+  const cred = settings.credentials[key] || {};
+  els.settingApiKey.value = cred.apiKey || '';
+  els.settingApiKey.placeholder = meta?.placeholder || 'sk-...';
+  els.settingModel.value = cred.model || '';
+  els.settingModel.placeholder = `默认 ${meta?.defaultModel || ''}`;
+}
+
+async function saveSettings() {
+  const providerName = els.settingProvider.value;
+  const meta = PROVIDERS[providerName];
+  const key = meta?.storeKey || 'openai';
+
+  settings.provider = providerName;
+  settings.targetLang = els.settingTargetLang.value;
+  if (!settings.credentials[key]) settings.credentials[key] = {};
+  settings.credentials[key].apiKey = els.settingApiKey.value.trim();
+  settings.credentials[key].model = els.settingModel.value.trim();
+
+  await window.tbDesktop.setSettings(settings);
+  els.settingsDialog.close();
 }
 
 function bindUI() {
@@ -662,7 +853,6 @@ function bindUI() {
     tab.lastLoadedVideoID = null;
     tab.webview.reload();
   });
-  // Shift+click "+" opens a private tab.
   els.btnNewTab.addEventListener('click', (e) => newTab(DEFAULT_URL, e.shiftKey));
   els.btnBookmark.addEventListener('click', () => toggleBookmark());
   els.btnBookmarks.addEventListener('click', () => {
@@ -683,38 +873,19 @@ function bindUI() {
   });
   els.btnSettings.addEventListener('click', () => openSettings());
 
-  els.settingProvider.addEventListener('change', () => {
-    const meta = PROVIDERS[els.settingProvider.value];
-    els.settingApiKey.placeholder = meta?.placeholder || 'sk-...';
-    els.settingModel.placeholder = `默认 ${meta?.defaultModel || ''}`;
-  });
+  els.settingProvider.addEventListener('change', onProviderChange);
 
   els.settingsForm.addEventListener('submit', async (e) => {
     const submitter = e.submitter;
     if (submitter && submitter.value === 'cancel') return;
     e.preventDefault();
-    settings = {
-      provider: els.settingProvider.value,
-      apiKey: els.settingApiKey.value.trim(),
-      model: els.settingModel.value.trim(),
-      targetLang: els.settingTargetLang.value,
-    };
-    await window.tbDesktop.setSettings(settings);
-    els.settingsDialog.close();
+    await saveSettings();
   });
   document.getElementById('settingsSave').addEventListener('click', async (e) => {
     e.preventDefault();
-    settings = {
-      provider: els.settingProvider.value,
-      apiKey: els.settingApiKey.value.trim(),
-      model: els.settingModel.value.trim(),
-      targetLang: els.settingTargetLang.value,
-    };
-    await window.tbDesktop.setSettings(settings);
-    els.settingsDialog.close();
+    await saveSettings();
   });
 
-  // Keep nav buttons fresh.
   setInterval(() => {
     if (!activeTabId) return;
     const tab = tabs.get(activeTabId);
@@ -744,6 +915,18 @@ function bindUI() {
 async function boot() {
   guestPreloadPath = await window.tbDesktop.getGuestPreloadPath();
   settings = await window.tbDesktop.getSettings();
+  // Migrate legacy flat settings to per-provider credentials
+  if (!settings.credentials) {
+    settings.credentials = {};
+  }
+  if (settings.apiKey && !Object.keys(settings.credentials).length) {
+    const meta = PROVIDERS[settings.provider];
+    const key = meta?.storeKey || 'openai';
+    settings.credentials[key] = { apiKey: settings.apiKey, model: settings.model || '' };
+    delete settings.apiKey;
+    delete settings.model;
+    await window.tbDesktop.setSettings(settings);
+  }
   bookmarks = await window.tbDesktop.listBookmarks();
   bindUI();
   newTab(DEFAULT_URL);

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Lightweight unit checks for caption parsing + numbered translation parsing.
+ * Lightweight unit checks for caption parsing, numbered translation parsing,
+ * and translation provider metadata.
  * Run: node scripts/test-core.mjs
  */
 import assert from 'node:assert/strict';
 import { parseCaptionBody } from '../renderer/subtitle.js';
-import { parseNumbered } from '../renderer/translation.js';
+import { parseNumbered, PROVIDERS, translateLive } from '../renderer/translation.js';
 
 const json3 = JSON.stringify({
   events: [
@@ -34,5 +35,14 @@ assert.deepEqual(numbered, ['你好', '世界 补充一行', '再见']);
 
 const empty = parseCaptionBody('   ');
 assert.deepEqual(empty, []);
+
+// Verify per-provider storeKey metadata
+assert.ok(PROVIDERS['ChatGPT (OpenAI)'].storeKey === 'openai');
+assert.ok(PROVIDERS['Claude (Anthropic)'].storeKey === 'anthropic');
+assert.ok(PROVIDERS['OpenRouter'].storeKey === 'openrouter');
+assert.ok(PROVIDERS['Grok (xAI)'].storeKey === 'xai');
+
+// Verify translateLive is exported as a function
+assert.equal(typeof translateLive, 'function');
 
 console.log('✓ desktop core tests passed');

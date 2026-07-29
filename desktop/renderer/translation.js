@@ -4,24 +4,28 @@ export const PROVIDERS = {
     defaultModel: 'gpt-4o-mini',
     placeholder: 'sk-...',
     style: 'openai',
+    storeKey: 'openai',
   },
   'Claude (Anthropic)': {
     endpoint: 'https://api.anthropic.com/v1/messages',
     defaultModel: 'claude-3-5-haiku-latest',
     placeholder: 'sk-ant-...',
     style: 'claude',
+    storeKey: 'anthropic',
   },
   OpenRouter: {
     endpoint: 'https://openrouter.ai/api/v1/chat/completions',
     defaultModel: 'openai/gpt-4o-mini',
     placeholder: 'sk-or-...',
     style: 'openrouter',
+    storeKey: 'openrouter',
   },
   'Grok (xAI)': {
     endpoint: 'https://api.x.ai/v1/chat/completions',
     defaultModel: 'grok-3-mini',
     placeholder: 'xai-...',
     style: 'openai',
+    storeKey: 'xai',
   },
 };
 
@@ -43,9 +47,11 @@ export function parseNumbered(text, count) {
   return result.slice(0, count);
 }
 
-async function chat({ provider, apiKey, model, prompt }) {
+async function chat({ provider, apiKey, model, prompt, maxTokens, timeoutMs }) {
   const meta = PROVIDERS[provider] || PROVIDERS['ChatGPT (OpenAI)'];
   const headers = { 'Content-Type': 'application/json' };
+  const resolvedMaxTokens = maxTokens || 8192;
+  const resolvedTimeout = timeoutMs || 60000;
   let body;
 
   if (meta.style === 'claude') {
@@ -53,7 +59,7 @@ async function chat({ provider, apiKey, model, prompt }) {
     headers['anthropic-version'] = '2023-06-01';
     body = {
       model,
-      max_tokens: 8192,
+      max_tokens: resolvedMaxTokens,
       messages: [{ role: 'user', content: prompt }],
     };
   } else {
@@ -63,12 +69,13 @@ async function chat({ provider, apiKey, model, prompt }) {
     }
     body = {
       model,
+      max_tokens: resolvedMaxTokens,
       messages: [{ role: 'user', content: prompt }],
     };
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
+  const timer = setTimeout(() => controller.abort(), resolvedTimeout);
   let res;
   try {
     res = await fetch(meta.endpoint, {
@@ -96,9 +103,46 @@ async function chat({ provider, apiKey, model, prompt }) {
   return content;
 }
 
+/**
+ * Translate 1-2 cues with a simpler prompt for lower latency (realtime mode).
+ */
+export async function translateLive({ provider, apiKey, model, texts, targetLang }) {
+  const meta = PROVIDERS[provider] || PROVIDERS['ChatGPT (OpenAI)'];
+  const resolvedModel = model || meta.defaultModel;
+  const count = texts.length;
+  const maxTokens = count <= 1 ? 256 : 512;
+  const timeoutMs = 20000;
+
+  let prompt;
+  if (count === 1) {
+    prompt = `翻译成${targetLang}，只输出译文，不要解释：\n${texts[0]}`;
+  } else {
+    const numbered = texts.map((t, i) => `${i + 1}. ${String(t).replace(/\n/g, ' ')}`).join('\n');
+    prompt = `将下列字幕逐条翻译成${targetLang}。只输出翻译，保留编号，每行一条：\n\n${numbered}`;
+  }
+
+  const reply = await chat({
+    provider,
+    apiKey,
+    model: resolvedModel,
+    prompt,
+    maxTokens,
+    timeoutMs,
+  });
+
+  if (count === 1) {
+    return [reply.trim()];
+  }
+  return parseNumbered(reply, count);
+}
+
 export async function translateTexts({ provider, apiKey, model, texts, targetLang }) {
   const meta = PROVIDERS[provider] || PROVIDERS['ChatGPT (OpenAI)'];
   const resolvedModel = model || meta.defaultModel;
+  const isSmall = texts.length <= 3;
+  const timeoutMs = isSmall ? 20000 : 60000;
+  const maxTokens = isSmall ? 512 : 8192;
+
   const numbered = texts
     .map((t, i) => `${i + 1}. ${String(t).replace(/\n/g, ' ')}`)
     .join('\n');
@@ -112,6 +156,8 @@ export async function translateTexts({ provider, apiKey, model, texts, targetLan
         apiKey,
         model: resolvedModel,
         prompt,
+        maxTokens,
+        timeoutMs,
       });
       const parsed = parseNumbered(reply, texts.length);
       const nonEmpty = parsed.filter((x) => x).length;

@@ -1,7 +1,7 @@
 {
   "name": "translate-browser",
   "productName": "译览",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Windows 桌面浏览器 + YouTube 双语字幕翻译（ChatGPT / Claude / OpenRouter / Grok）",
   "main": "main.js",
   "author": "译览",
