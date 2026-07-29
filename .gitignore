@@ -20,3 +20,12 @@ xcuserdata/
 # User settings
 *.swp
 *~
+
+# Electron / Node (Windows desktop)
+desktop/node_modules/
+desktop/dist/
+desktop/out/
+*.exe
+*.blockmap
+npm-debug.log*
+yarn-error.log*

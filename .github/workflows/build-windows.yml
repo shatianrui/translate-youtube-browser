@@ -1,0 +1,78 @@
+name: Build Windows Desktop
+
+on:
+  push:
+    branches: [ main, master, "cursor/**" ]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/build-windows.yml"
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows installers
+        run: npm run dist:win:ci
+        env:
+          # Avoid interactive electron-builder publish prompts in CI.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TranslateBrowser-Windows
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/latest.yml
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "✅ Windows 桌面端构建完成"
+            echo ""
+            echo "在 Artifacts 中下载 **TranslateBrowser-Windows**："
+            echo "- \`TranslateBrowser-*-win-x64.exe\` — NSIS 安装包"
+            echo "- \`TranslateBrowser-*-portable.exe\` — 便携版（免安装）"
+            echo ""
+            echo "首次使用请在「设置」中填写 LLM API Key，然后打开任意 YouTube 视频。"
+            ls -lh dist || true
+          } >> "$GITHUB_STEP_SUMMARY"
