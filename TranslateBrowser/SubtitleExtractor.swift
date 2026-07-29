@@ -801,23 +801,14 @@ enum JSON3Parser {
                     duration = 2.0
                 }
             }
+            // Clip to next cue start so stored windows match YouTube display timing.
+            if i + 1 < raw.count {
+                duration = min(duration, max(raw[i + 1].start - raw[i].start, 0.05))
+            }
             subs.append(Subtitle(start: raw[i].start, duration: max(duration, 0.05), text: raw[i].text))
         }
-        return mergeAdjacentDuplicates(subs)
-    }
-
-    private static func mergeAdjacentDuplicates(_ subs: [Subtitle]) -> [Subtitle] {
-        guard !subs.isEmpty else { return [] }
-        var out: [Subtitle] = []
-        for sub in subs {
-            if let last = out.last, last.text == sub.text, sub.start <= last.start + last.duration + 0.2 {
-                let end = max(last.start + last.duration, sub.start + sub.duration)
-                out[out.count - 1] = Subtitle(start: last.start, duration: end - last.start, text: last.text)
-            } else {
-                out.append(sub)
-            }
-        }
-        return out
+        // Keep original cue boundaries — merging identical lines across gaps breaks A/V sync.
+        return subs
     }
 }
 

@@ -89,12 +89,12 @@ final class Tab: ObservableObject, Identifiable {
     func onActiveIndexChanged(_ index: Int) {
         let previous = currentIndex
         currentIndex = subtitles.indices.contains(index) ? index : nil
-        // Fast-forward / seek into an untranslated region → bump priority so the next
-        // chunk is chosen around the new playhead instead of continuing far behind.
+        // Seek / fast-forward into untranslated region → restart so realtime hits the new cue ASAP.
         guard let currentIndex, needsTranslation(currentIndex) else { return }
-        if let previous, abs(currentIndex - previous) >= 3 {
+        if let previous, abs(currentIndex - previous) >= 2 {
             nudgeTranslationPriority()
-        } else if previous == nil {
+        } else if previous == nil || needsTranslation(currentIndex) {
+            // Crossing into a cue that still lacks a translation — wake the realtime loop.
             nudgeTranslationPriority()
         }
     }
@@ -106,13 +106,10 @@ final class Tab: ObservableObject, Identifiable {
 
     private func nudgeTranslationPriority() {
         let now = Date().timeIntervalSince1970
-        guard now - lastSeekNudgeTime > 0.4 else { return }
+        guard now - lastSeekNudgeTime > 0.35 else { return }
         lastSeekNudgeTime = now
-        translationEpoch &+= 1
-        // If idle (finished or not started) but still have gaps, resume.
-        if translationTask == nil || translationTask?.isCancelled == true {
-            startPriorityTranslation()
-        }
+        // Always restart: cancels an in-flight prefetch chunk and prioritizes the new playhead.
+        startRealtimeTranslation()
     }
 
     private func clearSubtitleState() {
@@ -230,11 +227,10 @@ final class Tab: ObservableObject, Identifiable {
             }
             if Task.isCancelled { return }
             subtitles = subs
-            // Push originals onto the video immediately (native CC position) so watching
-            // never depends on opening a list sheet.
-            statusMessage = "字幕已叠加，正在翻译当前片段…"
+            // Timeline is ready — show originals immediately, then realtime-translate the playhead.
+            statusMessage = "时间轴已就绪，实时翻译中…"
             await pushSubtitlesToPage()
-            startPriorityTranslation()
+            startRealtimeTranslation()
         } catch {
             if Task.isCancelled { return }
             statusMessage = "字幕获取失败: \(error.localizedDescription)"
@@ -320,11 +316,7 @@ final class Tab: ObservableObject, Identifiable {
         return t == nil || t?.isEmpty == true
     }
 
-    private func translatedCount() -> Int {
-        subtitles.indices.filter { !needsTranslation($0) }.count
-    }
-
-    /// Read the in-page video clock so priority can follow seeks / fast-forward.
+    /// Read the in-page video clock so realtime / prefetch follow seeks.
     private func currentPlaybackTime() async -> Double? {
         guard let webView else { return nil }
         let js = "(document.querySelector('video') ? document.querySelector('video').currentTime : -1)"
@@ -334,40 +326,51 @@ final class Tab: ObservableObject, Identifiable {
 
     private func indexNear(time: Double) -> Int {
         if let i = currentIndex, subtitles.indices.contains(i) { return i }
-        if let i = subtitles.firstIndex(where: { time <= $0.start + max($0.duration, 0.05) }) {
+        if let i = subtitles.firstIndex(where: { time < $0.start + max($0.duration, 0.05) }) {
             return i
         }
         return max(0, subtitles.count - 1)
     }
 
-    /// Next untranslated contiguous chunk, preferring "now → ahead", then behind.
-    private func nextPriorityChunk(playhead: Double, maxCount: Int) -> [Int]? {
-        guard !subtitles.isEmpty else { return nil }
-        let center = indexNear(time: playhead)
-
-        // 1) First untranslated at/after the playhead (current + pre-translate ahead)
-        if let start = (center..<subtitles.count).first(where: { needsTranslation($0) }) {
-            var indices = [start]
-            var i = start + 1
-            while indices.count < maxCount, i < subtitles.count, needsTranslation(i) {
-                indices.append(i)
-                i += 1
-            }
-            return indices
+    /// Current line (+ maybe the next) for minimum-latency realtime translation.
+    private func realtimeChunk(center: Int) -> [Int]? {
+        var indices: [Int] = []
+        if needsTranslation(center) { indices.append(center) }
+        let next = center + 1
+        if next < subtitles.count, needsTranslation(next) {
+            indices.append(next)
         }
-
-        // 2) Nothing ahead — fill gaps behind the playhead (user rewind)
-        if center > 0,
-           let end = (0..<center).reversed().first(where: { needsTranslation($0) }) {
-            let start = max(0, end - maxCount + 1)
-            let slice = Array(start...end).filter { needsTranslation($0) }
-            return slice.isEmpty ? nil : slice
+        // Also cover a cue that just started 1 behind if still on screen overlap.
+        let prev = center - 1
+        if prev >= 0, needsTranslation(prev), indices.count < 3 {
+            indices.insert(prev, at: 0)
         }
-
-        return nil
+        return indices.isEmpty ? nil : indices
     }
 
-    /// Manual "重新翻译": clear translations and restart priority pipeline.
+    /// Contiguous untranslated cues inside the rolling lookahead window only.
+    private func prefetchChunk(center: Int, playhead: Double, maxCount: Int, cueWindow: Int, secondsWindow: Double) -> [Int]? {
+        let windowEndIndex = min(subtitles.count, center + cueWindow)
+        let windowEndTime = playhead + secondsWindow
+        guard let start = (center..<windowEndIndex).first(where: { needsTranslation($0) }) else {
+            return nil
+        }
+        // Don't prefetch far beyond the time window either.
+        if subtitles[start].start > windowEndTime { return nil }
+
+        var indices = [start]
+        var i = start + 1
+        while indices.count < maxCount,
+              i < windowEndIndex,
+              needsTranslation(i),
+              subtitles[i].start <= windowEndTime {
+            indices.append(i)
+            i += 1
+        }
+        return indices
+    }
+
+    /// Manual "重新翻译": clear translations and restart realtime + prefetch.
     func translateAll() async {
         guard !apiKey.isEmpty else {
             statusMessage = "请在设置中填写 \(provider.rawValue) 的 API Key"
@@ -379,10 +382,10 @@ final class Tab: ObservableObject, Identifiable {
             subtitles[i].translation = nil
         }
         await pushSubtitlesToPage()
-        startPriorityTranslation()
+        startRealtimeTranslation()
     }
 
-    private func startPriorityTranslation() {
+    private func startRealtimeTranslation() {
         guard !apiKey.isEmpty else {
             statusMessage = "请在设置中填写 \(provider.rawValue) 的 API Key"
             tabsManager?.showSettings = true
@@ -393,79 +396,93 @@ final class Tab: ObservableObject, Identifiable {
         translationEpoch &+= 1
         let epoch = translationEpoch
         translationTask = Task { [weak self] in
-            await self?.runPriorityTranslation(epoch: epoch)
+            await self?.runRealtimeTranslation(epoch: epoch)
         }
     }
 
-    /// Translate around the playhead first, then keep pre-translating ahead; after each
-    /// chunk re-read currentTime so a seek immediately redirects priority.
-    private func runPriorityTranslation(epoch: Int) async {
+    /// Realtime: translate the playhead cue immediately.
+    /// Prefetch: keep a rolling window ahead translated (not the whole remaining track).
+    private func runRealtimeTranslation(epoch: Int) async {
         let service = TranslationService(
             provider: provider,
             apiKey: apiKey,
             model: model.isEmpty ? provider.defaultModel : model
         )
-        isTranslating = true
-        defer {
-            if translationEpoch == epoch {
-                isTranslating = false
-                translationTask = nil
-            }
-        }
 
-        // Slightly smaller chunks near the playhead for lower latency after seeks.
-        let nearChunk = 8
-        let aheadChunk = 14
+        // Realtime = tiny batches for low latency; prefetch = modest ahead fill.
+        let prefetchBatch = 8
+        let prefetchCues = 20          // ~rolling cue window ahead of playhead
+        let prefetchSeconds: Double = 75
 
         while !Task.isCancelled, translationEpoch == epoch {
             let playhead = await currentPlaybackTime()
                 ?? currentIndex.map { subtitles[$0].start }
                 ?? 0
             let center = indexNear(time: playhead)
-            let distanceToFirstGap: Int = {
-                if let gap = (center..<subtitles.count).first(where: { needsTranslation($0) }) {
-                    return gap - center
-                }
-                return 999
-            }()
-            let chunkSize = distanceToFirstGap <= 2 ? nearChunk : aheadChunk
 
-            guard let indices = nextPriorityChunk(playhead: playhead, maxCount: chunkSize),
-                  let first = indices.first, let last = indices.last else {
-                statusMessage = "翻译完成（\(provider.rawValue)）"
-                await pushSubtitlesToPage()
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
-                if translationEpoch == epoch, statusMessage.hasPrefix("翻译完成") {
-                    statusMessage = ""
-                }
-                return
+            // 1) Realtime — current (and immediate next) cue first.
+            if let indices = realtimeChunk(center: center) {
+                isTranslating = true
+                statusMessage = "实时翻译"
+                let ok = await translateIndices(indices, service: service, epoch: epoch)
+                if !ok { return }
+                continue
             }
 
-            let texts = indices.map { subtitles[$0].text }
-            let done = translatedCount()
-            statusMessage = "翻译 \(first + 1)–\(last + 1) · 已完成 \(done)/\(subtitles.count)"
-
-            do {
-                let translated = try await service.translate(texts: texts, to: targetLang)
-                if Task.isCancelled { return }
-                for (offset, idx) in indices.enumerated() {
-                    if translated.indices.contains(offset), needsTranslation(idx) {
-                        subtitles[idx].translation = translated[offset]
-                    }
-                }
-                await pushSubtitlesToPage()
-            } catch {
-                if Task.isCancelled { return }
-                statusMessage = "翻译失败: \(error.localizedDescription)"
-                return
+            // 2) Prefetch — only within the rolling ahead window.
+            if let indices = prefetchChunk(
+                center: center,
+                playhead: playhead,
+                maxCount: prefetchBatch,
+                cueWindow: prefetchCues,
+                secondsWindow: prefetchSeconds
+            ), let first = indices.first, let last = indices.last {
+                isTranslating = true
+                statusMessage = "预翻译 \(first + 1)–\(last + 1)"
+                let ok = await translateIndices(indices, service: service, epoch: epoch)
+                if !ok { return }
+                continue
             }
+
+            // 3) Window satisfied — idle briefly; playhead advance / seek wakes more work.
+            isTranslating = false
+            if statusMessage.hasPrefix("实时") || statusMessage.hasPrefix("预翻译") || statusMessage.contains("时间轴") {
+                statusMessage = ""
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+        }
+
+        if translationEpoch == epoch {
+            isTranslating = false
+            translationTask = nil
+        }
+    }
+
+    @discardableResult
+    private func translateIndices(_ indices: [Int], service: TranslationService, epoch: Int) async -> Bool {
+        guard !indices.isEmpty else { return true }
+        let texts = indices.map { subtitles[$0].text }
+        do {
+            let translated = try await service.translate(texts: texts, to: targetLang)
+            if Task.isCancelled || translationEpoch != epoch { return false }
+            for (offset, idx) in indices.enumerated() {
+                if translated.indices.contains(offset), needsTranslation(idx) {
+                    subtitles[idx].translation = translated[offset]
+                }
+            }
+            await pushSubtitlesToPage()
+            return true
+        } catch {
+            if Task.isCancelled || translationEpoch != epoch { return false }
+            statusMessage = "翻译失败: \(error.localizedDescription)"
+            isTranslating = false
+            return false
         }
     }
 
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
     func reload() {
-        // Allow extractAndTranslate to run again for the same video after a manual reload.
         lastLoadedVideoID = nil
         translationTask?.cancel()
         translationEpoch &+= 1
