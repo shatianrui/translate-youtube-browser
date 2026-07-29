@@ -199,7 +199,9 @@ final class Tab: ObservableObject, Identifiable {
             }
             if Task.isCancelled { return }
             subtitles = subs
-            statusMessage = "已提取 \(subs.count) 条，开始翻译…"
+            // Push originals onto the video immediately (native CC position) so watching
+            // never depends on opening a list sheet.
+            statusMessage = "字幕已叠加，正在翻译…"
             await pushSubtitlesToPage()
             await translateAll()
         } catch {
@@ -301,6 +303,11 @@ final class Tab: ObservableObject, Identifiable {
         }
         statusMessage = "翻译完成（\(provider.rawValue)）"
         await pushSubtitlesToPage()
+        // Clear the status chip shortly so it doesn't sit over the video.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        if statusMessage.hasPrefix("翻译完成") {
+            statusMessage = ""
+        }
     }
 
     func goBack() { webView?.goBack() }

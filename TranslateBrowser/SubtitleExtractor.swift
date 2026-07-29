@@ -190,19 +190,26 @@ enum SubtitleExtractor {
           window.__tbCaptionWaiters.push(function(b) {
             if (!settled) { settled = true; clearTimeout(timer); resolve(b); }
           });
-          // Nudge again a couple times — player module can lag after SPA nav
           setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 1200);
           setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 2800);
         });
 
+        // Turn native CC back off — we render bilingual text ourselves at the same spot.
+        try {
+          var player = findPlayer();
+          if (player && player.setOption) player.setOption('captions', 'track', {});
+          var btn = document.querySelector('.ytp-subtitles-button, button[aria-label*="ubtitles"], button[aria-label*="字幕"]');
+          if (btn && btn.getAttribute('aria-pressed') === 'true') btn.click();
+        } catch (e) {}
+
         if (!body) return JSON.stringify({ ok: false, body: '', url: window.__tbCapturedURL || '' });
 
-        // Prefer json3 for reliable parsing
         var url = window.__tbCapturedURL || '';
         if (url) {
           try {
             var u = new URL(url, location.origin);
             u.searchParams.set('fmt', 'json3');
+            // Keep pot / c params from the player's URL — required to beat empty-body blocks.
             var res = await fetch(u.toString(), { credentials: 'include', cache: 'no-store' });
             if (res.ok) {
               var text = await res.text();
@@ -330,42 +337,63 @@ enum SubtitleExtractor {
         }
       }, true);
 
-      // --- Bilingual overlay: embedded inside the video host, not a browser chrome popup ---
+      // --- Bilingual captions at YouTube's native CC position (not a separate panel/sheet) ---
       var style = document.createElement('style');
       style.textContent = [
-        '.ytp-caption-window-container,.caption-window{display:none !important;}',
-        'video{z-index:1;}',
-        '#tb-bilingual-caption{position:absolute;left:50%;bottom:8%;transform:translateX(-50%);',
-        'width:max-content;max-width:90%;z-index:2147483647;pointer-events:none;text-align:center;',
-        'font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;',
-        'display:none;}',
-        '#tb-caption-orig{color:rgba(255,255,255,0.88);font-size:clamp(11px,1.8vw,14px);',
-        'line-height:1.35;text-shadow:0 1px 3px rgba(0,0,0,0.95),0 0 8px rgba(0,0,0,0.6);',
-        'margin-bottom:4px;white-space:pre-wrap;}',
-        '#tb-caption-trans{color:#fff;font-size:clamp(15px,2.6vw,22px);font-weight:600;line-height:1.35;',
-        'text-shadow:0 1px 4px rgba(0,0,0,0.95);background:rgba(0,0,0,0.55);border-radius:8px;',
-        'padding:5px 12px;display:none;white-space:pre-wrap;}'
+        /* Keep YouTube's caption container for layout, hide only its native text nodes. */
+        '.ytp-caption-window-container .captions-text,',
+        '.ytp-caption-window-container .ytp-caption-segment,',
+        '.ytp-caption-window-container .caption-visual-line{opacity:0 !important;height:0 !important;',
+        'overflow:hidden !important;font-size:0 !important;padding:0 !important;margin:0 !important;}',
+        '.ytp-caption-window-container{pointer-events:none !important;z-index:40 !important;}',
+        '#tb-caption-window{position:absolute;left:50%;bottom:10%;transform:translate(-50%,0);',
+        'max-width:90%;width:max-content;text-align:center;pointer-events:none;z-index:41;',
+        'font-family:"YouTube Noto",Roboto,Arial,Helvetica,sans-serif;display:none;}',
+        '#tb-caption-orig{color:#fff;font-size:clamp(13px,2.2vw,18px);line-height:1.35;',
+        'text-shadow:0 0 2px #000,0 1px 3px rgba(0,0,0,.9);margin-bottom:2px;white-space:pre-wrap;',
+        'background:rgba(8,8,8,.55);padding:2px 6px;border-radius:3px;display:inline-block;}',
+        '#tb-caption-trans{color:#fff;font-size:clamp(15px,2.6vw,22px);font-weight:500;line-height:1.35;',
+        'text-shadow:0 0 2px #000,0 1px 3px rgba(0,0,0,.9);white-space:pre-wrap;',
+        'background:rgba(8,8,8,.65);padding:3px 8px;border-radius:3px;display:none;}'
       ].join('');
       (document.documentElement || document.head || document.body).appendChild(style);
 
+      function ensureNativeCaptionContainer(player) {
+        var container = player.querySelector('.ytp-caption-window-container');
+        if (container) return container;
+        container = document.createElement('div');
+        container.className = 'ytp-caption-window-container';
+        container.style.cssText = 'position:absolute;left:0;right:0;top:0;bottom:0;overflow:hidden;pointer-events:none;z-index:40;';
+        if (getComputedStyle(player).position === 'static') player.style.position = 'relative';
+        player.appendChild(container);
+        return container;
+      }
+
       function ensureOverlay() {
-        var host = findVideoHost();
-        if (!host) return null;
-        var el = document.getElementById('tb-bilingual-caption');
-        if (el && el.parentElement === host) return el;
-        if (el) el.remove();
-        el = document.createElement('div');
-        el.id = 'tb-bilingual-caption';
+        var player = findPlayerContainer();
+        if (!player) return null;
+        var host = player.classList && player.classList.contains('html5-video-player')
+          ? player
+          : (player.querySelector('.html5-video-player') || player);
+        var container = ensureNativeCaptionContainer(host);
+        var win = document.getElementById('tb-caption-window');
+        if (win && win.parentElement === container) return win;
+        if (win) win.remove();
+        win = document.createElement('div');
+        win.id = 'tb-caption-window';
+        win.className = 'ytp-caption-window ytp-caption-window-bottom ytp-caption-window-rollup';
         var orig = document.createElement('div');
         orig.id = 'tb-caption-orig';
         var trans = document.createElement('div');
         trans.id = 'tb-caption-trans';
-        el.appendChild(orig);
-        el.appendChild(trans);
-        var pos = getComputedStyle(host).position;
-        if (pos === 'static' || !pos) host.style.position = 'relative';
-        host.appendChild(el);
-        return el;
+        var wrap = document.createElement('div');
+        wrap.id = 'tb-bilingual-caption';
+        wrap.appendChild(orig);
+        wrap.appendChild(document.createElement('br'));
+        wrap.appendChild(trans);
+        win.appendChild(wrap);
+        container.appendChild(win);
+        return win;
       }
       function findCue(t) {
         var subs = window.__tbSubs;
@@ -385,26 +413,41 @@ enum SubtitleExtractor {
         return -1;
       }
       var lastIndex = -2;
+      function renderCue(idx) {
+        var win = ensureOverlay();
+        if (!win) return;
+        var origEl = win.querySelector('#tb-caption-orig');
+        var transEl = win.querySelector('#tb-caption-trans');
+        if (!origEl || !transEl) return;
+        if (idx < 0 || !window.__tbSubs[idx]) {
+          win.style.display = 'none';
+          origEl.textContent = '';
+          transEl.textContent = '';
+          transEl.style.display = 'none';
+          return;
+        }
+        var s = window.__tbSubs[idx];
+        origEl.textContent = s.o || '';
+        origEl.style.display = s.o ? 'inline-block' : 'none';
+        if (s.t) {
+          transEl.textContent = s.t;
+          transEl.style.display = 'inline-block';
+        } else {
+          transEl.textContent = '';
+          transEl.style.display = 'none';
+        }
+        win.style.display = (s.o || s.t) ? 'block' : 'none';
+      }
       function tick() {
         forceAllVideosInline(document);
         var host = findVideoHost();
         var video = findVideo(host);
-        var overlay = ensureOverlay();
-        if (!video || !overlay) return;
+        ensureOverlay();
+        if (!video) return;
         var idx = window.__tbSubs.length ? findCue(video.currentTime) : -1;
         if (idx === lastIndex) return;
         lastIndex = idx;
-        var origEl = overlay.querySelector('#tb-caption-orig');
-        var transEl = overlay.querySelector('#tb-caption-trans');
-        if (idx < 0) {
-          overlay.style.display = 'none';
-        } else {
-          var s = window.__tbSubs[idx];
-          origEl.textContent = s.o || '';
-          if (s.t) { transEl.textContent = s.t; transEl.style.display = 'inline-block'; }
-          else { transEl.textContent = ''; transEl.style.display = 'none'; }
-          overlay.style.display = (s.o || s.t) ? 'block' : 'none';
-        }
+        renderCue(idx);
         post('tbActiveIndex', idx);
       }
       document.addEventListener('timeupdate', function(e) {
@@ -415,7 +458,7 @@ enum SubtitleExtractor {
       }, true);
       document.addEventListener('fullscreenchange', function() { lastIndex = -2; tick(); });
       document.addEventListener('webkitfullscreenchange', function() { lastIndex = -2; tick(); });
-      setInterval(tick, 250);
+      setInterval(tick, 200);
 
       window.__tbSetSubtitles = function(subs) {
         window.__tbSubs = Array.isArray(subs) ? subs : [];
@@ -425,8 +468,7 @@ enum SubtitleExtractor {
       window.__tbClearSubtitles = function() {
         window.__tbSubs = [];
         lastIndex = -2;
-        var overlay = document.getElementById('tb-bilingual-caption');
-        if (overlay) overlay.style.display = 'none';
+        renderCue(-1);
       };
     })();
     """
@@ -446,37 +488,43 @@ enum SubtitleExtractor {
         let error: String?
     }
 
-    /// Primary path: let the YouTube player itself fetch timedtext (valid pot), intercept it.
-    /// Fallbacks: ANDROID_VR InnerTube tracks, then direct URLSession of page track URLs.
+    /// Beat YouTube empty-body blocks:
+    ///  1) ANDROID_VR timedtext URLs (no PoToken) — preferred, no CC UI flicker
+    ///  2) Intercept the player's own pot-bearing timedtext request
+    ///  3) Direct download of the page track URL (often empty when exp=xpe)
     static func fetchSubtitles(
         from track: CaptionTrack,
         videoID: String?,
         using webView: WKWebView?
     ) async throws -> [Subtitle] {
-        // 1) Player-side capture (works even when WEB timedtext requires PoToken)
+        // 1) ANDROID_VR first — avoids toggling native CC and survives WEB PoToken gates.
+        if let videoID {
+            if let vrTracks = try? await fetchTracksViaAndroidVR(videoID: videoID), !vrTracks.isEmpty {
+                let preferred = pickTrack(from: vrTracks, preferring: track.languageCode) ?? vrTracks.first
+                if let preferred {
+                    let vrSubs = try await downloadTrack(preferred, using: webView)
+                    if !vrSubs.isEmpty { return vrSubs }
+                }
+                for t in vrTracks {
+                    let subs = try await downloadTrack(t, using: nil)
+                    if !subs.isEmpty { return subs }
+                }
+            }
+        }
+
+        // 2) Player-side capture (pot-bearing timedtext from the live player)
         if let webView {
-            if let body = try await captureViaPlayer(webView: webView, preferLang: track.languageCode) {
+            if let body = try await captureViaPlayer(webView: webView, preferLang: track.languageCode.isEmpty ? "en" : track.languageCode) {
                 let parsed = parseCaptionBody(body)
                 if !parsed.isEmpty { return parsed }
             }
         }
 
-        // 2) ANDROID_VR track URLs (no PoToken on subs currently)
-        if let videoID {
-            let vrTracks = try await fetchTracksViaAndroidVR(videoID: videoID)
-            let preferred = pickTrack(from: vrTracks, preferring: track.languageCode) ?? vrTracks.first
-            if let preferred {
-                let vrSubs = try await downloadTrack(preferred, using: webView)
-                if !vrSubs.isEmpty { return vrSubs }
-            }
-            for t in vrTracks {
-                let subs = try await downloadTrack(t, using: nil)
-                if !subs.isEmpty { return subs }
-            }
+        // 3) Last resort: naked page track URL
+        if !track.baseUrl.isEmpty {
+            return try await downloadTrack(track, using: webView)
         }
-
-        // 3) Last resort: direct download of the page track (often empty when exp=xpe)
-        return try await downloadTrack(track, using: webView)
+        return []
     }
 
     @MainActor

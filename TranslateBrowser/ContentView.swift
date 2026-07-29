@@ -96,61 +96,40 @@ struct ContentView: View {
     }
 
     private func subtitleHUD(for tab: Tab) -> some View {
-        Group {
-            if tab.showSubtitlePanel {
-                HStack(spacing: 10) {
+        // Tiny non-blocking status only — captions themselves render ON the video.
+        // Never require opening a list sheet to watch bilingual captions.
+        let showChip = tab.isTranslating
+            || (!tab.statusMessage.isEmpty && !tab.statusMessage.hasPrefix("翻译完成"))
+            || tab.statusMessage.contains("拦截")
+            || tab.statusMessage.contains("失败")
+
+        return Group {
+            if showChip {
+                HStack(spacing: 8) {
                     if tab.isTranslating {
                         ProgressView()
-                            .scaleEffect(0.7)
+                            .scaleEffect(0.65)
                             .tint(.white)
                     }
-                    Image(systemName: "captions.bubble.fill")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.9))
-                    Text(tab.statusMessage.isEmpty ? "打开 YouTube 视频自动叠加双语字幕" : tab.statusMessage)
+                    Text(tab.statusMessage.isEmpty ? "处理字幕中…" : tab.statusMessage)
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Button { tab.showSubtitleList = true } label: {
-                        Image(systemName: "list.bullet")
-                    }
-                    .disabled(tab.subtitles.isEmpty)
-                    Button { Task { await tab.translateAll() } } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(tab.subtitles.isEmpty || tab.isTranslating)
-                    Button { tab.reload() } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    Button { tab.showSubtitlePanel = false } label: {
-                        Image(systemName: "xmark")
+                    if tab.statusMessage.contains("拦截") || tab.statusMessage.contains("失败") {
+                        Button { tab.reload() } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
                     }
                 }
                 .font(.caption)
                 .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial.opacity(0.95), in: Capsule())
-                .background(Color.black.opacity(0.35), in: Capsule())
-            } else {
-                HStack {
-                    Spacer()
-                    Button {
-                        tab.showSubtitlePanel = true
-                    } label: {
-                        Label("字幕", systemImage: "captions.bubble")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .background(Color.black.opacity(0.35), in: Capsule())
-                            .foregroundStyle(.white)
-                    }
-                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.4), in: Capsule())
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .allowsHitTesting(tab.statusMessage.contains("拦截") || tab.statusMessage.contains("失败"))
             }
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     // MARK: - Safari bottom chrome
@@ -233,6 +212,22 @@ struct ContentView: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
+                .contextMenu {
+                    if let tab = activeTab {
+                        Button {
+                            tab.showSubtitleList = true
+                        } label: {
+                            Label("字幕列表", systemImage: "list.bullet")
+                        }
+                        .disabled(tab.subtitles.isEmpty)
+                        Button {
+                            Task { await tab.translateAll() }
+                        } label: {
+                            Label("重新翻译", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(tab.subtitles.isEmpty || tab.isTranslating)
+                    }
+                }
             }
         }
         .padding(.horizontal, 12)
