@@ -26,7 +26,7 @@ enum YouTubeAdBlock {
     static func installContentRules(into controller: WKUserContentController) async {
         let id = "TranslateBrowserYouTubeAds"
         do {
-            let store = WKContentRuleListStore.default()
+            guard let store = WKContentRuleListStore.default() else { return }
             if let existing = try await store.contentRuleList(forIdentifier: id) {
                 controller.add(existing)
                 return
