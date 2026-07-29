@@ -122,7 +122,21 @@ function captionURLCandidates(base) {
     }
     return base + (base.includes('?') ? '&' : '?') + `fmt=${fmt}`;
   };
-  return [...new Set([withFmt('json3'), withFmt('3'), withFmt('srv3'), base])];
+  // Prefer json3; also try without pot/exp (sometimes helps on non-gated tracks).
+  const stripped = base
+    .replace(/([?&])pot=[^&]*/g, '$1')
+    .replace(/([?&])exp=[^&]*/g, '$1')
+    .replace(/[?&]$/, '')
+    .replace(/\?&/, '?')
+    .replace(/&&+/g, '&');
+  return [...new Set([
+    withFmt(base, 'json3'),
+    withFmt(base, '3'),
+    withFmt(base, 'srv3'),
+    base,
+    withFmt(stripped, 'json3'),
+    stripped,
+  ])];
 }
 
 function normalizeTrackUrl(baseUrl) {
@@ -131,7 +145,41 @@ function normalizeTrackUrl(baseUrl) {
     .replace(/\\\//g, '/');
 }
 
+function enhanceTimedtextURL(urlString) {
+  try {
+    const u = new URL(urlString);
+    if (!u.searchParams.get('fmt')) u.searchParams.set('fmt', 'json3');
+    if (!u.searchParams.get('c')) u.searchParams.set('c', 'WEB');
+    return u.toString();
+  } catch {
+    let s = urlString;
+    if (!/[?&]fmt=/.test(s)) s += (s.includes('?') ? '&' : '?') + 'fmt=json3';
+    if (!/[?&]c=/.test(s)) s += '&c=WEB';
+    return s;
+  }
+}
+
+async function fetchBodyViaMain(urlString, headers = {}) {
+  if (!window.tbDesktop?.fetchText) return null;
+  try {
+    const result = await window.tbDesktop.fetchText(urlString, headers);
+    if (result?.ok && result.body) return result.body;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 async function fetchBodyViaURLSession(urlString) {
+  // Prefer main-process fetch (no CORS). Fall back to renderer fetch.
+  const viaMain = await fetchBodyViaMain(urlString, {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Referer: 'https://www.youtube.com',
+    Origin: 'https://www.youtube.com',
+  });
+  if (viaMain) return viaMain;
+
   const res = await fetch(urlString, {
     headers: {
       'User-Agent':
@@ -146,7 +194,9 @@ async function fetchBodyViaURLSession(urlString) {
 
 async function fetchBodyViaWebView(urlString, webview) {
   if (!webview) return null;
-  const raw = await webview.executeJavaScript(`(${FETCH_BODY_ASYNC_JS})(${JSON.stringify(urlString)})`);
+  const raw = await webview.executeJavaScript(
+    `(${FETCH_BODY_ASYNC_JS})(${JSON.stringify(enhanceTimedtextURL(urlString))})`,
+  );
   if (typeof raw !== 'string') return null;
   try {
     const result = JSON.parse(raw);
@@ -175,37 +225,115 @@ async function downloadTrack(track, webview) {
   return [];
 }
 
-export async function fetchTracksViaAndroidVR(videoID) {
-  const endpoint = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
-  const res = await fetch(endpoint, {
-    method: 'POST',
+const INNERTUBE_CLIENTS = [
+  {
+    name: 'ANDROID_VR',
+    ua: 'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12) gzip',
     headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12) gzip',
       'X-Youtube-Client-Name': '28',
-      'X-Youtube-Client-Version': '1.60.19',
+      'X-Youtube-Client-Version': '1.65.10',
     },
-    body: JSON.stringify({
-      context: {
-        client: {
-          clientName: 'ANDROID_VR',
-          clientVersion: '1.60.19',
-          hl: 'en',
-          gl: 'US',
-          androidSdkVersion: 34,
-          osName: 'Android',
-          osVersion: '12',
+    client: {
+      clientName: 'ANDROID_VR',
+      clientVersion: '1.65.10',
+      androidSdkVersion: 32,
+      osName: 'Android',
+      osVersion: '12',
+      hl: 'en',
+      gl: 'US',
+    },
+  },
+  {
+    name: 'ANDROID',
+    ua: 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip',
+    headers: {
+      'X-Youtube-Client-Name': '3',
+      'X-Youtube-Client-Version': '20.10.38',
+    },
+    client: {
+      clientName: 'ANDROID',
+      clientVersion: '20.10.38',
+      androidSdkVersion: 34,
+      osName: 'Android',
+      osVersion: '14',
+      hl: 'en',
+      gl: 'US',
+    },
+  },
+  {
+    name: 'IOS',
+    ua: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
+    headers: {
+      'X-Youtube-Client-Name': '5',
+      'X-Youtube-Client-Version': '20.10.4',
+    },
+    client: {
+      clientName: 'IOS',
+      clientVersion: '20.10.4',
+      deviceMake: 'Apple',
+      deviceModel: 'iPhone16,2',
+      osName: 'iPhone',
+      osVersion: '18.3.2.22D82',
+      hl: 'en',
+      gl: 'US',
+    },
+  },
+  {
+    name: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+    ua: 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version',
+    headers: {},
+    client: {
+      clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+      clientVersion: '2.0',
+      hl: 'en',
+      gl: 'US',
+    },
+    thirdParty: { embedUrl: 'https://www.youtube.com' },
+  },
+];
+
+export async function fetchTracksViaAndroidVR(videoID) {
+  return fetchTracksViaInnerTube(videoID);
+}
+
+export async function fetchTracksViaInnerTube(videoID) {
+  if (window.tbDesktop?.fetchInnerTubeTracks) {
+    try {
+      const tracks = await window.tbDesktop.fetchInnerTubeTracks(videoID);
+      if (Array.isArray(tracks) && tracks.length) return tracks;
+    } catch {
+      // fall through to local attempts
+    }
+  }
+
+  for (const c of INNERTUBE_CLIENTS) {
+    try {
+      const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': c.ua,
+          ...c.headers,
         },
-      },
-      videoId: videoID,
-      contentCheckOk: true,
-      racyCheckOk: true,
-    }),
-  });
-  if (!res.ok) throw new Error(`InnerTube HTTP ${res.status}`);
-  const root = await res.json();
-  const tracks = root?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-  return Array.isArray(tracks) ? tracks : [];
+        body: JSON.stringify({
+          context: {
+            client: c.client,
+            ...(c.thirdParty ? { thirdParty: c.thirdParty } : {}),
+          },
+          videoId: videoID,
+          contentCheckOk: true,
+          racyCheckOk: true,
+        }),
+      });
+      if (!res.ok) continue;
+      const root = await res.json();
+      const tracks = root?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (Array.isArray(tracks) && tracks.length) return tracks;
+    } catch {
+      // try next client
+    }
+  }
+  return [];
 }
 
 function pickTrack(tracks, preferring) {
@@ -221,19 +349,81 @@ function pickTrack(tracks, preferring) {
   return tracks.find((t) => t.kind !== 'asr') || tracks[0] || null;
 }
 
-export async function fetchSubtitles(track, videoID, webview) {
-  const pageSubs = await downloadTrack(track, webview);
-  if (pageSubs.length) return pageSubs;
+/**
+ * Ask the page to enable captions so YouTube itself downloads timedtext (with PoToken),
+ * then parse the intercepted body.
+ */
+export async function fetchSubtitlesViaPlayerCapture(webview, preferLang = 'en') {
+  if (!webview) return [];
+  try {
+    const raw = await webview.executeJavaScript(
+      `window.__tbForceCaptionLoad && window.__tbForceCaptionLoad(${JSON.stringify(preferLang)})`,
+    );
+    if (raw?.ok && raw.body) {
+      const parsed = parseCaptionBody(raw.body);
+      if (parsed.length) return parsed;
+    }
+    // If we intercepted a pot-bearing URL but body was empty, try fetching that URL again
+    // from the page (sometimes the first response races before pot is ready).
+    if (raw?.lastUrl) {
+      const body = await fetchBodyViaWebView(raw.lastUrl, webview);
+      const parsed = parseCaptionBody(body || '');
+      if (parsed.length) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
 
+export async function fetchSubtitlesViaTranscriptPanel(webview) {
+  if (!webview) return [];
+  try {
+    const rows = await webview.executeJavaScript(
+      'window.__tbScrapeTranscriptPanel && window.__tbScrapeTranscriptPanel()',
+    );
+    if (Array.isArray(rows) && rows.length) {
+      return rows.map((r) => ({
+        start: Number(r.start) || 0,
+        duration: Math.max(Number(r.duration) || 2, 0.05),
+        text: cleanCaptionText(r.text || ''),
+        translation: null,
+      })).filter((r) => r.text);
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+export async function fetchSubtitles(track, videoID, webview) {
+  // 1) Prefer capturing the player's own PoToken-authenticated timedtext download.
+  const captured = await fetchSubtitlesViaPlayerCapture(
+    webview,
+    track?.languageCode || 'en',
+  );
+  if (captured.length) return captured;
+
+  // 2) Direct download of the page track (works when PoToken is not required).
+  if (track?.baseUrl) {
+    const pageSubs = await downloadTrack(track, webview);
+    if (pageSubs.length) return pageSubs;
+  }
+
+  // 3) Scrape YouTube's official transcript panel from the DOM.
+  const panelSubs = await fetchSubtitlesViaTranscriptPanel(webview);
+  if (panelSubs.length) return panelSubs;
+
+  // 4) InnerTube alternate clients → download those caption URLs.
   if (videoID) {
-    const vrTracks = await fetchTracksViaAndroidVR(videoID);
-    const preferred = pickTrack(vrTracks, track.languageCode) || vrTracks[0];
+    const vrTracks = await fetchTracksViaInnerTube(videoID);
+    const preferred = pickTrack(vrTracks, track?.languageCode) || vrTracks[0];
     if (preferred) {
-      const vrSubs = await downloadTrack(preferred, null);
+      const vrSubs = await downloadTrack(preferred, webview);
       if (vrSubs.length) return vrSubs;
     }
     for (const t of vrTracks) {
-      const subs = await downloadTrack(t, null);
+      const subs = await downloadTrack(t, webview);
       if (subs.length) return subs;
     }
   }

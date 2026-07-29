@@ -54,3 +54,13 @@ GitHub Actions 工作流：`.github/workflows/build-windows.yml`（push / PR 变
 4. 字幕会出现在播放器底部；也可点工具栏「字幕列表」浏览全文
 
 API Key 只保存在本机用户目录，不会上传到本项目服务器。
+
+## 字幕为空？
+
+YouTube 现在对 WEB 字幕接口要求 PoToken。译览会：
+
+1. 拦截播放器自己的 timedtext 下载（自带 PoToken）
+2. 回退到页面「文字稿」面板抓取
+3. 再尝试 InnerTube 多客户端备用通道
+
+若仍提示为空，点工具栏刷新重试，并确认该视频本身有字幕。
