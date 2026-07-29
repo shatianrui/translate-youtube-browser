@@ -295,10 +295,18 @@ async function extractAndTranslate(tab) {
   setStatus(tab, `正在下载字幕（${track.languageCode || '?'}）…`, 'busy');
 
   try {
+    // Ensure PoToken interceptors / player helpers are present (idempotent).
+    try {
+      await tab.webview.executeJavaScript(BILINGUAL_OVERLAY_JS);
+    } catch {
+      // ignore
+    }
+
+    setStatus(tab, '正在通过播放器通道获取字幕…', 'busy');
     const subs = await fetchSubtitles(track, videoID, tab.webview);
     if (token !== tab.extractionToken) return;
     if (!subs.length) {
-      setStatus(tab, '字幕内容为空（可能被 YouTube 限制，请稍后重试）', 'error');
+      setStatus(tab, '字幕内容为空（可点刷新重试，或确认视频有字幕）', 'error');
       return;
     }
     tab.subtitles = subs;

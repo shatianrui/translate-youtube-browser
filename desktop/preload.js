@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('tbDesktop', {
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   getGuestPreloadPath: () => ipcRenderer.invoke('app:getGuestPreloadPath'),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  fetchText: (url, headers) => ipcRenderer.invoke('net:fetchText', url, headers),
+  fetchInnerTubeTracks: (videoID) => ipcRenderer.invoke('net:fetchInnerTubeTracks', videoID),
   onMenuNewTab: (cb) => {
     const handler = () => cb();
     ipcRenderer.on('menu-new-tab', handler);

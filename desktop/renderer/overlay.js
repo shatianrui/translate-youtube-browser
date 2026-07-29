@@ -3,9 +3,9 @@
  */
 export const BILINGUAL_OVERLAY_JS = `
 (function() {
-  if (window.__tbInstalled) return;
+  if (window.__tbInstalled && window.__tbForceCaptionLoad) return;
   window.__tbInstalled = true;
-  window.__tbSubs = [];
+  window.__tbSubs = window.__tbSubs || [];
 
   function post(name, payload) {
     try {
@@ -129,6 +129,183 @@ export const BILINGUAL_OVERLAY_JS = `
     lastIndex = -2;
     var overlay = document.getElementById('tb-bilingual-caption');
     if (overlay) overlay.style.display = 'none';
+  };
+
+  // ---- PoToken workaround: intercept the player's own timedtext fetches ----
+  // YouTube's WEB caption URLs often include exp=xpe and need a BotGuard PoToken.
+  // Direct fetches return HTTP 200 with an empty body. The real player mints pot
+  // and downloads captions itself — we capture that response.
+  window.__tbCapturedCaptions = null;
+  window.__tbLastTimedtextUrl = null;
+
+  function maybeCapture(url, body) {
+    try {
+      if (!url || !/\\/api\\/timedtext/i.test(String(url))) return;
+      window.__tbLastTimedtextUrl = String(url);
+      if (!body || !String(body).trim()) return;
+      window.__tbCapturedCaptions = {
+        url: String(url),
+        body: String(body),
+        at: Date.now(),
+      };
+    } catch (e) {}
+  }
+
+  if (!window.__tbFetchPatched) {
+    window.__tbFetchPatched = true;
+    var origFetch = window.fetch;
+    window.fetch = function() {
+      var args = arguments;
+      var input = args[0];
+      var url = typeof input === 'string' ? input : (input && input.url);
+      return origFetch.apply(this, args).then(function(res) {
+        try {
+          if (url && /\\/api\\/timedtext/i.test(String(url))) {
+            res.clone().text().then(function(t) { maybeCapture(url, t); }).catch(function() {});
+          }
+        } catch (e) {}
+        return res;
+      });
+    };
+
+    var OrigXHR = window.XMLHttpRequest;
+    function PatchedXHR() {
+      var xhr = new OrigXHR();
+      var _url = '';
+      var _open = xhr.open;
+      xhr.open = function(method, url) {
+        _url = url;
+        return _open.apply(xhr, arguments);
+      };
+      xhr.addEventListener('load', function() {
+        try {
+          if (_url && /\\/api\\/timedtext/i.test(String(_url))) {
+            maybeCapture(_url, xhr.responseText);
+          }
+        } catch (e) {}
+      });
+      return xhr;
+    }
+    PatchedXHR.prototype = OrigXHR.prototype;
+    window.XMLHttpRequest = PatchedXHR;
+  }
+
+  function sleep(ms) {
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  }
+
+  function pickPlayerTrack(preferLang) {
+    var player = findPlayerContainer();
+    var host = player && (player.querySelector && player.querySelector('.html5-video-player') || player);
+    if (!host || typeof host.getOption !== 'function') return null;
+    var list = [];
+    try { list = host.getOption('captions', 'tracklist') || []; } catch (e) {}
+    if (!list.length) return null;
+    var prefer = String(preferLang || 'en').slice(0, 2);
+    return list.find(function(t) {
+      return String(t.languageCode || '').startsWith(prefer) && t.kind !== 'asr';
+    }) || list.find(function(t) {
+      return String(t.languageCode || '').startsWith('en') && t.kind !== 'asr';
+    }) || list.find(function(t) {
+      return String(t.languageCode || '').startsWith('en');
+    }) || list[0];
+  }
+
+  window.__tbForceCaptionLoad = async function(preferLang) {
+    window.__tbCapturedCaptions = null;
+    var player = findPlayerContainer();
+    var host = player && ((player.classList && player.classList.contains('html5-video-player'))
+      ? player
+      : (player && player.querySelector && player.querySelector('.html5-video-player')) || player);
+    if (!host) return { ok: false, reason: 'no-player' };
+
+    try { if (typeof host.loadModule === 'function') host.loadModule('captions'); } catch (e) {}
+    try { if (typeof host.setOption === 'function') host.setOption('captions', 'reload', true); } catch (e) {}
+
+    var track = pickPlayerTrack(preferLang);
+    if (track && typeof host.setOption === 'function') {
+      try { host.setOption('captions', 'track', track); } catch (e) {}
+    } else {
+      var cc = document.querySelector('.ytp-subtitles-button');
+      if (cc && cc.getAttribute('aria-pressed') !== 'true') {
+        try { cc.click(); } catch (e) {}
+      }
+    }
+
+    var deadline = Date.now() + 9000;
+    while (Date.now() < deadline) {
+      if (window.__tbCapturedCaptions && window.__tbCapturedCaptions.body) {
+        return {
+          ok: true,
+          body: window.__tbCapturedCaptions.body,
+          url: window.__tbCapturedCaptions.url,
+        };
+      }
+      await sleep(200);
+    }
+    return {
+      ok: false,
+      reason: 'timeout',
+      lastUrl: window.__tbLastTimedtextUrl || null,
+    };
+  };
+
+  window.__tbScrapeTranscriptPanel = async function() {
+    function findTranscriptButton() {
+      var nodes = document.querySelectorAll('button, yt-button-shape button, a');
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        var label = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).toLowerCase();
+        if (/show transcript|transcript|显示文字稿|打开文字稿|文字稿|字幕/.test(label)
+            && /transcript|文字稿/.test(label)) {
+          return el;
+        }
+      }
+      return document.querySelector('button[aria-label*="transcript" i], button[aria-label*="文字稿"]');
+    }
+
+    var btn = findTranscriptButton();
+    if (btn) {
+      try { btn.click(); } catch (e) {}
+      await sleep(1200);
+    }
+
+    var segments = document.querySelectorAll(
+      'ytd-transcript-segment-renderer, ytd-transcript-body-renderer ytd-transcript-segment-renderer'
+    );
+    if (!segments.length) {
+      // Expand description "show more" then retry once.
+      var more = document.querySelector('tp-yt-paper-button#expand, #expand');
+      if (more) {
+        try { more.click(); } catch (e) {}
+        await sleep(600);
+        btn = findTranscriptButton();
+        if (btn) {
+          try { btn.click(); } catch (e) {}
+          await sleep(1200);
+        }
+        segments = document.querySelectorAll('ytd-transcript-segment-renderer');
+      }
+    }
+
+    var out = [];
+    for (var i = 0; i < segments.length; i++) {
+      var seg = segments[i];
+      var textEl = seg.querySelector('.segment-text, yt-formatted-string.segment-text');
+      var timeEl = seg.querySelector('.segment-timestamp, div.segment-timestamp');
+      var text = ((textEl && textEl.textContent) || seg.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (!text) continue;
+      var ts = ((timeEl && timeEl.textContent) || '').trim();
+      var start = 0;
+      var parts = ts.split(':').map(Number);
+      if (parts.length === 3) start = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      else if (parts.length === 2) start = parts[0] * 60 + parts[1];
+      out.push({ start: start, duration: 2, text: text, translation: null });
+    }
+    for (var j = 0; j < out.length - 1; j++) {
+      out[j].duration = Math.max(out[j + 1].start - out[j].start, 0.05);
+    }
+    return out;
   };
 })();
 `;
