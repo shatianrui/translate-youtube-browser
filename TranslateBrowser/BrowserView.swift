@@ -12,8 +12,13 @@ struct BrowserView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        // Critical: keep <video> inside the WKWebView instead of handing off to the native
+        // iOS fullscreen / AVKit controller (the "弹出播放窗口" behavior).
         config.allowsInlineMediaPlayback = true
+        config.allowsPictureInPictureMediaPlayback = false
         config.mediaTypesRequiringUserActionForPlayback = []
+        // Prefer the standards Fullscreen API on a DOM element (our caption overlay lives
+        // inside the player) over the legacy media fullscreen presentation.
         config.preferences.isElementFullscreenEnabled = true
         if tab.isPrivate {
             config.websiteDataStore = .nonPersistent()

@@ -221,20 +221,50 @@ enum SubtitleExtractor {
         window.__tbCapturedURL = null;
       };
 
-      // --- Bilingual overlay inside the player ---
-      var style = document.createElement('style');
-      style.textContent = [
-        '.ytp-caption-window-container{display:none !important;}',
-        '#tb-bilingual-caption{position:absolute;left:50%;bottom:9%;transform:translateX(-50%);',
-        'max-width:min(92%,720px);z-index:2147483647;pointer-events:none;text-align:center;',
-        'font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;}',
-        '#tb-caption-orig{color:rgba(255,255,255,0.82);font-size:clamp(12px,2.1vw,15px);',
-        'line-height:1.35;text-shadow:0 1px 3px rgba(0,0,0,0.95);margin-bottom:4px;white-space:pre-wrap;}',
-        '#tb-caption-trans{color:#fff;font-size:clamp(16px,3vw,22px);font-weight:600;line-height:1.35;',
-        'text-shadow:0 1px 4px rgba(0,0,0,0.95);background:rgba(0,0,0,0.45);border-radius:8px;',
-        'padding:5px 12px;display:none;white-space:pre-wrap;}'
-      ].join('');
-      (document.documentElement || document.head || document.body).appendChild(style);
+      // --- Keep playback INLINE (never hand off to iOS native fullscreen popup) ---
+      function forcePlaysInline(video) {
+        if (!video || video.tagName !== 'VIDEO') return;
+        try {
+          video.setAttribute('playsinline', '');
+          video.setAttribute('webkit-playsinline', '');
+          video.playsInline = true;
+          // Prefer in-page presentation; never allow native fullscreen takeover.
+          if ('webkitSupportsPresentationMode' in video) {
+            try { video.webkitSetPresentationMode && video.webkitSetPresentationMode('inline'); } catch (e) {}
+          }
+        } catch (e) {}
+      }
+      function forceAllVideosInline(root) {
+        var scope = root || document;
+        var list = scope.querySelectorAll ? scope.querySelectorAll('video') : [];
+        for (var i = 0; i < list.length; i++) forcePlaysInline(list[i]);
+      }
+      forceAllVideosInline(document);
+      try {
+        var mo = new MutationObserver(function(mutations) {
+          for (var i = 0; i < mutations.length; i++) {
+            var nodes = mutations[i].addedNodes;
+            for (var j = 0; j < nodes.length; j++) {
+              var n = nodes[j];
+              if (!n || n.nodeType !== 1) continue;
+              if (n.tagName === 'VIDEO') forcePlaysInline(n);
+              else forceAllVideosInline(n);
+            }
+          }
+        });
+        mo.observe(document.documentElement || document, { childList: true, subtree: true });
+      } catch (e) {}
+      document.addEventListener('webkitbeginfullscreen', function(e) {
+        // If iOS still tries to present the native video controller, bail out immediately.
+        try {
+          var v = e.target;
+          if (v && v.webkitExitFullscreen) v.webkitExitFullscreen();
+          enterDOMFullscreen();
+        } catch (err) {}
+      }, true);
+      document.addEventListener('play', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') forcePlaysInline(e.target);
+      }, true);
 
       function findPlayerContainer() {
         return document.getElementById('movie_player')
@@ -242,28 +272,98 @@ enum SubtitleExtractor {
           || document.querySelector('#player')
           || document.querySelector('ytd-player');
       }
+      function findVideoHost() {
+        var player = findPlayerContainer();
+        if (!player) return null;
+        // Prefer the box that actually wraps the <video> so captions sit on the picture.
+        return player.querySelector('.html5-video-container')
+          || (player.classList && player.classList.contains('html5-video-player') ? player : null)
+          || player.querySelector('.html5-video-player')
+          || player;
+      }
       function findVideo(container) {
         return (container && container.querySelector('video')) || document.querySelector('video');
       }
+      function enterDOMFullscreen() {
+        var host = findPlayerContainer();
+        var target = host && (host.querySelector('.html5-video-player') || host);
+        if (!target) return;
+        try {
+          if (target.requestFullscreen) target.requestFullscreen();
+          else if (target.webkitRequestFullscreen) target.webkitRequestFullscreen();
+        } catch (e) {}
+      }
+
+      // Hard-block native AVKit fullscreen. NEVER fall back to webkitEnterFullscreen —
+      // that is exactly the "弹出播放窗口" the user does not want.
+      try {
+        var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
+        if (proto) {
+          if (proto.webkitEnterFullscreen) {
+            proto.webkitEnterFullscreen = function() { enterDOMFullscreen(); };
+          }
+          if (proto.webkitEnterFullScreen) {
+            proto.webkitEnterFullScreen = function() { enterDOMFullscreen(); };
+          }
+        }
+      } catch (e) {}
+
+      // YouTube fullscreen button → DOM fullscreen on the player (keeps our caption node).
+      document.addEventListener('click', function(e) {
+        var btn = e.target && e.target.closest && e.target.closest(
+          '.ytp-fullscreen-button, button.ytp-fullscreen-button, .ytp-size-button'
+        );
+        if (!btn) return;
+        // Let theater mode (size) pass; only redirect true fullscreen.
+        if (btn.classList.contains('ytp-size-button')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var player = findPlayerContainer();
+        var isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+        if (isFs) {
+          try {
+            if (document.exitFullscreen) document.exitFullscreen();
+            else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+          } catch (err) {}
+        } else {
+          enterDOMFullscreen();
+        }
+      }, true);
+
+      // --- Bilingual overlay: embedded inside the video host, not a browser chrome popup ---
+      var style = document.createElement('style');
+      style.textContent = [
+        '.ytp-caption-window-container,.caption-window{display:none !important;}',
+        'video{z-index:1;}',
+        '#tb-bilingual-caption{position:absolute;left:50%;bottom:8%;transform:translateX(-50%);',
+        'width:max-content;max-width:90%;z-index:2147483647;pointer-events:none;text-align:center;',
+        'font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;',
+        'display:none;}',
+        '#tb-caption-orig{color:rgba(255,255,255,0.88);font-size:clamp(11px,1.8vw,14px);',
+        'line-height:1.35;text-shadow:0 1px 3px rgba(0,0,0,0.95),0 0 8px rgba(0,0,0,0.6);',
+        'margin-bottom:4px;white-space:pre-wrap;}',
+        '#tb-caption-trans{color:#fff;font-size:clamp(15px,2.6vw,22px);font-weight:600;line-height:1.35;',
+        'text-shadow:0 1px 4px rgba(0,0,0,0.95);background:rgba(0,0,0,0.55);border-radius:8px;',
+        'padding:5px 12px;display:none;white-space:pre-wrap;}'
+      ].join('');
+      (document.documentElement || document.head || document.body).appendChild(style);
+
       function ensureOverlay() {
-        var container = findPlayerContainer();
-        if (!container) return null;
-        var host = container.classList && container.classList.contains('html5-video-player')
-          ? container
-          : (container.querySelector('.html5-video-player') || container);
+        var host = findVideoHost();
+        if (!host) return null;
         var el = document.getElementById('tb-bilingual-caption');
         if (el && el.parentElement === host) return el;
         if (el) el.remove();
         el = document.createElement('div');
         el.id = 'tb-bilingual-caption';
-        el.style.display = 'none';
         var orig = document.createElement('div');
         orig.id = 'tb-caption-orig';
         var trans = document.createElement('div');
         trans.id = 'tb-caption-trans';
         el.appendChild(orig);
         el.appendChild(trans);
-        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+        var pos = getComputedStyle(host).position;
+        if (pos === 'static' || !pos) host.style.position = 'relative';
         host.appendChild(el);
         return el;
       }
@@ -286,8 +386,9 @@ enum SubtitleExtractor {
       }
       var lastIndex = -2;
       function tick() {
-        var container = findPlayerContainer();
-        var video = findVideo(container);
+        forceAllVideosInline(document);
+        var host = findVideoHost();
+        var video = findVideo(host);
         var overlay = ensureOverlay();
         if (!video || !overlay) return;
         var idx = window.__tbSubs.length ? findCue(video.currentTime) : -1;
@@ -312,6 +413,8 @@ enum SubtitleExtractor {
       document.addEventListener('seeked', function(e) {
         if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; tick(); }
       }, true);
+      document.addEventListener('fullscreenchange', function() { lastIndex = -2; tick(); });
+      document.addEventListener('webkitfullscreenchange', function() { lastIndex = -2; tick(); });
       setInterval(tick, 250);
 
       window.__tbSetSubtitles = function(subs) {
@@ -325,24 +428,6 @@ enum SubtitleExtractor {
         var overlay = document.getElementById('tb-bilingual-caption');
         if (overlay) overlay.style.display = 'none';
       };
-
-      try {
-        var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
-        if (proto && proto.webkitEnterFullscreen) {
-          var original = proto.webkitEnterFullscreen;
-          proto.webkitEnterFullscreen = function() {
-            var self = this;
-            var args = arguments;
-            var container = findPlayerContainer();
-            var host = container && (container.querySelector('.html5-video-player') || container);
-            if (host && host.requestFullscreen) {
-              host.requestFullscreen().catch(function() { original.apply(self, args); });
-            } else {
-              original.apply(self, args);
-            }
-          };
-        }
-      } catch (e) {}
     })();
     """
 
