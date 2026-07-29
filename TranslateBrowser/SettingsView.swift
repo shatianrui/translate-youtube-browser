@@ -39,7 +39,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Text("打开 YouTube 视频后，双语字幕会自动出现在画面底部原 CC 位置。翻译会优先当前播放位置并向前预翻译，快进后会立刻改跟新进度。API Key 仅保存在本机。")
+                    Text("打开视频后先载入字幕时间轴（原文立刻显示），再对当前台词实时翻译，并预翻译后续约 1 分钟内容。快进会立刻跟到新位置。API Key 仅保存在本机。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

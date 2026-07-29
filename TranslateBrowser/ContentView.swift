@@ -99,9 +99,15 @@ struct ContentView: View {
         // Tiny non-blocking status only — captions themselves render ON the video.
         // Never require opening a list sheet to watch bilingual captions.
         let showChip = tab.isTranslating
-            || (!tab.statusMessage.isEmpty && !tab.statusMessage.hasPrefix("翻译完成"))
+            || tab.statusMessage.hasPrefix("实时")
+            || tab.statusMessage.hasPrefix("预翻译")
+            || tab.statusMessage.contains("时间轴")
             || tab.statusMessage.contains("拦截")
             || tab.statusMessage.contains("失败")
+            || tab.statusMessage.contains("获取")
+            || tab.statusMessage.contains("下载")
+            || tab.statusMessage.contains("通道")
+            || tab.statusMessage.contains("就绪")
 
         return Group {
             if showChip {
