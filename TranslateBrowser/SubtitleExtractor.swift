@@ -191,6 +191,24 @@ enum SubtitleExtractor {
         return !!track || !!player;
       }
 
+      // Keep native CC ON by default. YouTube only issues pot-bearing timedtext when CC
+      // is active; our CSS already hides the native text so bilingual overlay can replace it.
+      window.__tbEnsureCaptionsOn = function(preferLang) {
+        return enableNativeCaptions(preferLang || 'en');
+      };
+      function keepCaptionsOn() {
+        try { enableNativeCaptions('en'); } catch (e) {}
+      }
+      ['yt-navigate-finish', 'yt-page-data-updated'].forEach(function(evt) {
+        window.addEventListener(evt, function() { setTimeout(keepCaptionsOn, 400); setTimeout(keepCaptionsOn, 1500); }, true);
+      });
+      document.addEventListener('play', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') setTimeout(keepCaptionsOn, 200);
+      }, true);
+      setTimeout(keepCaptionsOn, 800);
+      setTimeout(keepCaptionsOn, 2500);
+      setTimeout(keepCaptionsOn, 5000);
+
       // Ask the player to load captions so its own request (with pot) hits our hooks.
       // Then optionally re-fetch the captured URL as json3 for a clean parse.
       window.__tbRequestCaptions = async function(preferLang) {
@@ -204,23 +222,19 @@ enum SubtitleExtractor {
           var settled = false;
           var timer = setTimeout(function() {
             if (!settled) { settled = true; resolve(window.__tbCapturedBody); }
-          }, 9000);
+          }, 12000);
           window.__tbCaptionWaiters.push(function(b) {
             if (!settled) { settled = true; clearTimeout(timer); resolve(b); }
           });
-          setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 1200);
-          setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 2800);
+          setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 800);
+          setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 2200);
+          setTimeout(function() { enableNativeCaptions(preferLang || 'en'); }, 4500);
         });
 
-        // Turn native CC back off — we render bilingual text ourselves at the same spot.
-        try {
-          var player = findPlayer();
-          if (player && player.setOption) player.setOption('captions', 'track', {});
-          var btn = document.querySelector('.ytp-subtitles-button, button[aria-label*="ubtitles"], button[aria-label*="字幕"]');
-          if (btn && btn.getAttribute('aria-pressed') === 'true') btn.click();
-        } catch (e) {}
+        // Keep native CC ON — turning it off was a common cause of "blocked" empty timedtext.
+        enableNativeCaptions(preferLang || 'en');
 
-        if (!body) return JSON.stringify({ ok: false, body: '', url: window.__tbCapturedURL || '' });
+        if (!body) return JSON.stringify({ ok: false, body: '', url: window.__tbCapturedURL || '', error: 'no_capture' });
 
         var url = window.__tbCapturedURL || '';
         if (url) {
@@ -611,30 +625,15 @@ enum SubtitleExtractor {
     }
 
     /// Beat YouTube empty-body blocks:
-    ///  1) ANDROID_VR timedtext URLs (no PoToken) — preferred, no CC UI flicker
-    ///  2) Intercept the player's own pot-bearing timedtext request
+    ///  1) Intercept the player's own pot-bearing timedtext (CC kept ON by default)
+    ///  2) ANDROID_VR / embedded client timedtext URLs
     ///  3) Direct download of the page track URL (often empty when exp=xpe)
     static func fetchSubtitles(
         from track: CaptionTrack,
         videoID: String?,
         using webView: WKWebView?
     ) async throws -> [Subtitle] {
-        // 1) ANDROID_VR first — avoids toggling native CC and survives WEB PoToken gates.
-        if let videoID {
-            if let vrTracks = try? await fetchTracksViaAndroidVR(videoID: videoID), !vrTracks.isEmpty {
-                let preferred = pickTrack(from: vrTracks, preferring: track.languageCode) ?? vrTracks.first
-                if let preferred {
-                    let vrSubs = try await downloadTrack(preferred, using: webView)
-                    if !vrSubs.isEmpty { return vrSubs }
-                }
-                for t in vrTracks {
-                    let subs = try await downloadTrack(t, using: nil)
-                    if !subs.isEmpty { return subs }
-                }
-            }
-        }
-
-        // 2) Player-side capture (pot-bearing timedtext from the live player)
+        // 1) Player-side capture first — with CC kept on, this is the most reliable pot path.
         if let webView {
             if let body = try await captureViaPlayer(webView: webView, preferLang: track.languageCode.isEmpty ? "en" : track.languageCode) {
                 let parsed = parseCaptionBody(body)
@@ -642,9 +641,38 @@ enum SubtitleExtractor {
             }
         }
 
+        // 2) InnerTube clients that often expose timedtext without WEB PoToken.
+        if let videoID {
+            let vrTracks = (try? await fetchTracksViaAndroidVR(videoID: videoID)) ?? []
+            let embedTracks = vrTracks.isEmpty
+                ? ((try? await fetchTracksViaEmbedded(videoID: videoID)) ?? [])
+                : []
+            let altTracks = vrTracks.isEmpty ? embedTracks : vrTracks
+            if !altTracks.isEmpty {
+                let preferred = pickTrack(from: altTracks, preferring: track.languageCode) ?? altTracks.first
+                if let preferred {
+                    let vrSubs = try await downloadTrack(preferred, using: webView)
+                    if !vrSubs.isEmpty { return vrSubs }
+                }
+                for t in altTracks {
+                    let subs = try await downloadTrack(t, using: webView)
+                    if !subs.isEmpty { return subs }
+                }
+            }
+        }
+
         // 3) Last resort: naked page track URL
         if !track.baseUrl.isEmpty {
-            return try await downloadTrack(track, using: webView)
+            let direct = try await downloadTrack(track, using: webView)
+            if !direct.isEmpty { return direct }
+        }
+
+        // 4) One more player capture after alternatives failed (CC may have just become ready).
+        if let webView {
+            if let body = try await captureViaPlayer(webView: webView, preferLang: track.languageCode.isEmpty ? "en" : track.languageCode) {
+                let parsed = parseCaptionBody(body)
+                if !parsed.isEmpty { return parsed }
+            }
         }
         return []
     }
@@ -710,30 +738,59 @@ enum SubtitleExtractor {
     }
 
     static func fetchTracksViaAndroidVR(videoID: String) async throws -> [CaptionTrack] {
+        try await fetchTracksViaInnerTube(
+            videoID: videoID,
+            clientName: "ANDROID_VR",
+            clientVersion: "1.60.19",
+            userAgent: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12) gzip",
+            clientNameHeader: "28",
+            extraClient: [
+                "androidSdkVersion": 34,
+                "osName": "Android",
+                "osVersion": "12",
+            ]
+        )
+    }
+
+    /// WEB_EMBEDDED player often still exposes captionTracks without WEB PoToken gates.
+    static func fetchTracksViaEmbedded(videoID: String) async throws -> [CaptionTrack] {
+        try await fetchTracksViaInnerTube(
+            videoID: videoID,
+            clientName: "WEB_EMBEDDED_PLAYER",
+            clientVersion: "1.20240723.01.00",
+            userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+            clientNameHeader: "56",
+            extraClient: [:]
+        )
+    }
+
+    private static func fetchTracksViaInnerTube(
+        videoID: String,
+        clientName: String,
+        clientVersion: String,
+        userAgent: String,
+        clientNameHeader: String,
+        extraClient: [String: Any]
+    ) async throws -> [CaptionTrack] {
         let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12) gzip",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("28", forHTTPHeaderField: "X-Youtube-Client-Name")
-        request.setValue("1.60.19", forHTTPHeaderField: "X-Youtube-Client-Version")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(clientNameHeader, forHTTPHeaderField: "X-Youtube-Client-Name")
+        request.setValue(clientVersion, forHTTPHeaderField: "X-Youtube-Client-Version")
+
+        var client: [String: Any] = [
+            "clientName": clientName,
+            "clientVersion": clientVersion,
+            "hl": "en",
+            "gl": "US",
+        ]
+        for (k, v) in extraClient { client[k] = v }
 
         let body: [String: Any] = [
-            "context": [
-                "client": [
-                    "clientName": "ANDROID_VR",
-                    "clientVersion": "1.60.19",
-                    "hl": "en",
-                    "gl": "US",
-                    "androidSdkVersion": 34,
-                    "osName": "Android",
-                    "osVersion": "12",
-                ]
-            ],
+            "context": ["client": client],
             "videoId": videoID,
             "contentCheckOk": true,
             "racyCheckOk": true,

@@ -218,9 +218,16 @@ final class Tab: ObservableObject, Identifiable {
         )
         if Task.isCancelled { return }
 
+        // Turn native CC on ASAP — YouTube only emits pot-bearing timedtext while CC is active.
+        // Native text is CSS-hidden; we overlay bilingual captions in the same place.
+        _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
+
         var tracks: [CaptionTrack] = []
         for attempt in 0..<16 {
             if Task.isCancelled { return }
+            if attempt == 0 || attempt == 4 || attempt == 8 {
+                _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
+            }
             if let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
                let data = json.data(using: .utf8),
                let decoded = try? JSONDecoder().decode([CaptionTrack].self, from: data),
@@ -236,6 +243,9 @@ final class Tab: ObservableObject, Identifiable {
         if tracks.isEmpty, let videoID {
             tracks = (try? await SubtitleExtractor.fetchTracksViaAndroidVR(videoID: videoID)) ?? []
         }
+        if tracks.isEmpty, let videoID {
+            tracks = (try? await SubtitleExtractor.fetchTracksViaEmbedded(videoID: videoID)) ?? []
+        }
 
         // Even without a track list, player capture may still succeed if CC can be toggled.
         let track = tracks.isEmpty
@@ -243,25 +253,58 @@ final class Tab: ObservableObject, Identifiable {
             : pickBestTrack(from: tracks)
 
         do {
-            // Prefer any body already stolen by the network hooks while we were polling.
             var subs: [Subtitle] = []
-            if let pending = pendingCapturedBody {
-                pendingCapturedBody = nil
-                subs = SubtitleExtractor.parseCaptionBody(pending)
+
+            // Give the player a moment to fire timedtext after CC-on, then prefer that body.
+            for _ in 0..<6 {
+                if Task.isCancelled { return }
+                if let pending = pendingCapturedBody, pending.count > 20 {
+                    pendingCapturedBody = nil
+                    subs = SubtitleExtractor.parseCaptionBody(pending)
+                    if !subs.isEmpty { break }
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
+
             if subs.isEmpty {
-                subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
+                // Up to 3 full fetch attempts — intermittent PoToken / race after ads.
+                for attempt in 0..<3 {
+                    if Task.isCancelled { return }
+                    _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
+                    if attempt > 0 {
+                        pendingCapturedBody = nil
+                        _ = try? await webView.evaluateJavaScript(
+                            "window.__tbClearCaptionCapture && window.__tbClearCaptionCapture();"
+                        )
+                        try? await Task.sleep(nanoseconds: UInt64(800_000_000 * attempt))
+                    }
+                    subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
+                    if !subs.isEmpty { break }
+                    if let pending = pendingCapturedBody {
+                        pendingCapturedBody = nil
+                        subs = SubtitleExtractor.parseCaptionBody(pending)
+                        if !subs.isEmpty { break }
+                    }
+                }
             }
-            // One more chance: hooks may have filled pending during the async wait.
-            if subs.isEmpty, let pending = pendingCapturedBody {
-                pendingCapturedBody = nil
-                subs = SubtitleExtractor.parseCaptionBody(pending)
-            }
+
             guard !subs.isEmpty else {
-                statusMessage = "字幕获取被 YouTube 拦截，请点 ↻ 重试或先点开视频 CC 字幕"
+                statusMessage = "字幕获取被 YouTube 拦截，请点 ↻ 重试（已默认开启 CC）"
+                // Soft auto-retry a couple of times after player/CC settle — not an infinite loop.
+                if captionFetchRetries < 2 {
+                    captionFetchRetries += 1
+                    let retryFor = videoID
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        guard let self, !Task.isCancelled else { return }
+                        guard self.subtitles.isEmpty, self.lastLoadedVideoID == retryFor else { return }
+                        await self.extractAndTranslate()
+                    }
+                }
                 return
             }
             if Task.isCancelled { return }
+            captionFetchRetries = 0
             subtitles = subs
             statusMessage = ""
             await pushSubtitlesToPage()
