@@ -8,6 +8,16 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable {
 
     var id: String { rawValue }
 
+    /// Stable UserDefaults suffix — independent of display `rawValue`.
+    var settingsID: String {
+        switch self {
+        case .openai: return "openai"
+        case .claude: return "claude"
+        case .openrouter: return "openrouter"
+        case .grok: return "grok"
+        }
+    }
+
     var defaultModel: String {
         switch self {
         case .openai: return "gpt-4o-mini"
@@ -33,6 +43,62 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable {
         case .openrouter: return "sk-or-..."
         case .grok: return "xai-..."
         }
+    }
+}
+
+/// Per-provider API key + model, so switching ChatGPT / Claude / OpenRouter / Grok
+/// keeps each service's credentials instead of overwriting a single shared pair.
+enum ProviderCredentials {
+    private static let legacyAPIKey = "apiKey"
+    private static let legacyModel = "model"
+    private static let migratedFlag = "providerCredentials.migratedLegacy"
+
+    private static func apiKeyKey(for provider: LLMProvider) -> String {
+        "apiKey.\(provider.settingsID)"
+    }
+
+    private static func modelKey(for provider: LLMProvider) -> String {
+        "model.\(provider.settingsID)"
+    }
+
+    /// One-time: copy old shared apiKey/model into the currently selected provider.
+    static func migrateLegacyIfNeeded(currentProvider: LLMProvider) {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: migratedFlag) else { return }
+        defaults.set(true, forKey: migratedFlag)
+
+        let oldKey = defaults.string(forKey: legacyAPIKey) ?? ""
+        let oldModel = defaults.string(forKey: legacyModel) ?? ""
+        if !oldKey.isEmpty, (defaults.string(forKey: apiKeyKey(for: currentProvider)) ?? "").isEmpty {
+            defaults.set(oldKey, forKey: apiKeyKey(for: currentProvider))
+        }
+        if !oldModel.isEmpty, (defaults.string(forKey: modelKey(for: currentProvider)) ?? "").isEmpty {
+            defaults.set(oldModel, forKey: modelKey(for: currentProvider))
+        }
+    }
+
+    static func apiKey(for provider: LLMProvider) -> String {
+        migrateLegacyIfNeeded(currentProvider: provider)
+        return UserDefaults.standard.string(forKey: apiKeyKey(for: provider)) ?? ""
+    }
+
+    static func setAPIKey(_ value: String, for provider: LLMProvider) {
+        UserDefaults.standard.set(value, forKey: apiKeyKey(for: provider))
+    }
+
+    static func model(for provider: LLMProvider) -> String {
+        migrateLegacyIfNeeded(currentProvider: provider)
+        return UserDefaults.standard.string(forKey: modelKey(for: provider)) ?? ""
+    }
+
+    static func setModel(_ value: String, for provider: LLMProvider) {
+        UserDefaults.standard.set(value, forKey: modelKey(for: provider))
+    }
+
+    /// Resolved model name: stored override or provider default.
+    static func resolvedModel(for provider: LLMProvider) -> String {
+        let stored = model(for: provider)
+        return stored.isEmpty ? provider.defaultModel : stored
     }
 }
 

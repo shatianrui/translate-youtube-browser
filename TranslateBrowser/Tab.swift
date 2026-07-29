@@ -23,8 +23,6 @@ final class Tab: ObservableObject, Identifiable {
     @Published var showSubtitleList = false
 
     @AppStorage("provider") private var providerRaw = LLMProvider.openai.rawValue
-    @AppStorage("apiKey") private var apiKey = ""
-    @AppStorage("model") private var model = ""
     @AppStorage("targetLang") private var targetLang = "中文"
 
     weak var webView: WKWebView?
@@ -46,6 +44,9 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     var provider: LLMProvider { LLMProvider(rawValue: providerRaw) ?? .openai }
+
+    private var apiKey: String { ProviderCredentials.apiKey(for: provider) }
+    private var model: String { ProviderCredentials.resolvedModel(for: provider) }
 
     var displayTitle: String {
         if !pageTitle.isEmpty { return pageTitle }
@@ -409,7 +410,7 @@ final class Tab: ObservableObject, Identifiable {
         let service = TranslationService(
             provider: provider,
             apiKey: apiKey,
-            model: model.isEmpty ? provider.defaultModel : model
+            model: model
         )
 
         // Realtime = tiny batches for low latency; prefetch = modest ahead fill.
