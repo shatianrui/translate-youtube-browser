@@ -65,8 +65,8 @@ enum SubtitleExtractor {
     """
 
     /// Injected once per page load. Renders bilingual captions inside the YouTube player DOM
-    /// (so they survive fullscreen), redirects webkitEnterFullscreen to Element.requestFullscreen,
-    /// and reports SPA navigations back to Swift.
+    /// (so they survive DOM fullscreen), reports native/DOM fullscreen state to Swift for
+    /// landscape rotation, and reports SPA navigations back to Swift.
     static let bilingualOverlayJS = """
     (function() {
       if (window.__tbInstalled) return;

@@ -129,7 +129,9 @@ struct BrowserView: UIViewRepresentable {
                 Task { @MainActor in tab.onActiveIndexChanged(index) }
             case "tbFullscreenChanged":
                 guard let isFullscreen = message.body as? Bool else { return }
-                Task { @MainActor in OrientationLock.shared.setFullscreen(isFullscreen) }
+                Task { @MainActor in
+                    OrientationLock.shared.setFullscreen(isFullscreen, in: webView.window?.windowScene)
+                }
             default:
                 break
             }
