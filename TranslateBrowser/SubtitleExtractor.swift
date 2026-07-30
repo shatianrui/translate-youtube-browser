@@ -355,12 +355,23 @@ enum SubtitleExtractor {
 
     @MainActor
     private static func fetchBodyViaWebView(_ urlString: String, webView: WKWebView) async throws -> String? {
-        let rawValue = try await webView.callAsyncJavaScript(
-            fetchBodyAsyncJS,
-            arguments: ["url": urlString],
-            in: nil,
-            in: .page
-        )
+        // WebKit's completion-handler API returns the JavaScript value. Its async overlay can
+        // resolve to Void on newer SDKs, silently discarding the fetch result and forcing a
+        // less reliable out-of-process URLSession request.
+        let rawValue: Any = try await withCheckedThrowingContinuation { continuation in
+            webView.callAsyncJavaScript(
+                fetchBodyAsyncJS,
+                arguments: ["url": urlString],
+                in: nil,
+                in: .page,
+                completionHandler: { result in
+                    switch result {
+                    case .success(let value): continuation.resume(returning: value)
+                    case .failure(let error): continuation.resume(throwing: error)
+                    }
+                }
+            )
+        }
         guard let raw = rawValue as? String,
               let data = raw.data(using: .utf8),
               let result = try? JSONDecoder().decode(FetchResult.self, from: data),

@@ -42,4 +42,9 @@ assert.match(appDelegate, /supportedInterfaceOrientationsFor[\s\S]*OrientationLo
 assert.match(app, /@UIApplicationDelegateAdaptor\(AppDelegate\.self\)/,
   'The SwiftUI app must install its UIKit app delegate');
 
+assert.match(subtitleScript, /func fetchBodyViaWebView[\s\S]*withCheckedThrowingContinuation[\s\S]*callAsyncJavaScript[\s\S]*completionHandler:\s*\{ result in[\s\S]*case \.success\(let value\): continuation\.resume\(returning: value\)[\s\S]*case \.failure\(let error\): continuation\.resume\(throwing: error\)/,
+  'In-page caption downloads must bridge WKWebView callAsyncJavaScript completion results instead of receiving Void from its async overlay');
+assert.match(subtitleScript, /func fetchBodyViaWebView[\s\S]*guard let raw = rawValue as\? String/,
+  'The bridged in-page response must be decoded before URLSession fallback');
+
 console.log('iOS fullscreen/landscape source contract passed');
