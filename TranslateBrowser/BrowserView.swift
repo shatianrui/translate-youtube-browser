@@ -60,6 +60,7 @@ struct BrowserView: UIViewRepresentable {
         let tab: Tab
         let onOpenLinkInNewTab: (URL) -> Void
         weak var refreshControl: UIRefreshControl?
+        weak var webView: WKWebView?
         private var observations: [NSKeyValueObservation] = []
 
         init(tab: Tab, onOpenLinkInNewTab: @escaping (URL) -> Void) {
@@ -76,6 +77,7 @@ struct BrowserView: UIViewRepresentable {
         /// The other KVO paths drive the Safari-style chrome: progress bar, back/forward state,
         /// and the tab switcher's title.
         func observe(_ webView: WKWebView) {
+            self.webView = webView
             observations = [
                 webView.observe(\.url, options: [.new]) { [weak self] _, change in
                     guard let self, let url = change.newValue ?? nil else { return }
@@ -130,7 +132,7 @@ struct BrowserView: UIViewRepresentable {
             case "tbFullscreenChanged":
                 guard let isFullscreen = message.body as? Bool else { return }
                 Task { @MainActor in
-                    OrientationLock.shared.setFullscreen(isFullscreen, in: webView.window?.windowScene)
+                    OrientationLock.shared.setFullscreen(isFullscreen, in: self.webView?.window?.windowScene)
                 }
             default:
                 break

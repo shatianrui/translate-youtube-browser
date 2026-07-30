@@ -17,7 +17,7 @@ const appDelegate = existsSync(join(root, 'TranslateBrowser/AppDelegate.swift'))
 
 assert.match(browserView, /contentController\.add\(context\.coordinator, name: "tbFullscreenChanged"\)/,
   'BrowserView must register the JavaScript fullscreen-state bridge');
-assert.match(browserView, /case "tbFullscreenChanged":\s*guard let isFullscreen = message\.body as\? Bool else \{ return \}\s*Task \{ @MainActor in\s*OrientationLock\.shared\.setFullscreen\(isFullscreen, in: webView\.window\?\.windowScene\)\s*\}/s,
+assert.match(browserView, /case "tbFullscreenChanged":\s*guard let isFullscreen = message\.body as\? Bool else \{ return \}\s*Task \{ @MainActor in\s*OrientationLock\.shared\.setFullscreen\(isFullscreen, in: self\.webView\?\.window\?\.windowScene\)\s*\}/s,
   'BrowserView must forward fullscreen state with the originating web view scene');
 assert.match(browserView, /createWebViewWith[\s\S]*navigationAction\.targetFrame == nil[\s\S]*webView\.load\(navigationAction\.request\)/,
   'target=_blank video/player navigation must be loaded in the current web view instead of being dropped');
