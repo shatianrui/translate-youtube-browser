@@ -684,7 +684,7 @@ enum SubtitleExtractor {
             requestCaptionsAsyncJS,
             arguments: ["preferLang": preferLang.isEmpty ? "en" : preferLang],
             in: nil,
-            in: .page
+            contentWorld: .page
         )
         guard let raw = rawValue as? String,
               let data = raw.data(using: .utf8),
@@ -853,7 +853,7 @@ enum SubtitleExtractor {
             fetchBodyAsyncJS,
             arguments: ["url": urlString],
             in: nil,
-            in: .page
+            contentWorld: .page
         )
         guard let raw = rawValue as? String,
               let data = raw.data(using: .utf8),
