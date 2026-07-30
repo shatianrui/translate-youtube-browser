@@ -83,6 +83,12 @@ enum SubtitleExtractor {
         document.addEventListener(evt, notifyURL, true);
       });
       window.addEventListener('popstate', notifyURL);
+
+      // Drives landscape playback: tells Swift when the player's fullscreen element opens or
+      // closes so it can lock/unlock device orientation to landscape.
+      function notifyFullscreen() { post('tbFullscreenChanged', !!document.fullscreenElement); }
+      document.addEventListener('fullscreenchange', notifyFullscreen, true);
+      document.addEventListener('webkitfullscreenchange', notifyFullscreen, true);
       var _ps = history.pushState;
       history.pushState = function() { var r = _ps.apply(this, arguments); setTimeout(notifyURL, 0); return r; };
       var _rs = history.replaceState;

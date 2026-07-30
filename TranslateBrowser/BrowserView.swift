@@ -27,6 +27,7 @@ struct BrowserView: UIViewRepresentable {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "tbUrlChanged")
         contentController.add(context.coordinator, name: "tbActiveIndex")
+        contentController.add(context.coordinator, name: "tbFullscreenChanged")
         contentController.addUserScript(WKUserScript(
             source: SubtitleExtractor.bilingualOverlayJS,
             injectionTime: .atDocumentStart,
@@ -126,6 +127,9 @@ struct BrowserView: UIViewRepresentable {
             case "tbActiveIndex":
                 guard let index = message.body as? Int else { return }
                 Task { @MainActor in tab.onActiveIndexChanged(index) }
+            case "tbFullscreenChanged":
+                guard let isFullscreen = message.body as? Bool else { return }
+                Task { @MainActor in OrientationLock.shared.setFullscreen(isFullscreen) }
             default:
                 break
             }
