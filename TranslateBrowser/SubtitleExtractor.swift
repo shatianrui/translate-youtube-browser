@@ -83,20 +83,58 @@ enum SubtitleExtractor {
         document.addEventListener(evt, notifyURL, true);
       });
       window.addEventListener('popstate', notifyURL);
-
-      // Drives landscape playback: tells Swift when the player's fullscreen element opens or
-      // closes so it can lock/unlock device orientation to landscape.
-      function notifyFullscreen() { post('tbFullscreenChanged', !!document.fullscreenElement); }
-      document.addEventListener('fullscreenchange', notifyFullscreen, true);
-      document.addEventListener('webkitfullscreenchange', notifyFullscreen, true);
       var _ps = history.pushState;
       history.pushState = function() { var r = _ps.apply(this, arguments); setTimeout(notifyURL, 0); return r; };
       var _rs = history.replaceState;
       history.replaceState = function() { var r = _rs.apply(this, arguments); setTimeout(notifyURL, 0); return r; };
 
+      // --- timedtext capture -------------------------------------------------
+      // The caption `baseUrl` in the player response is gated: YouTube stamps it with `exp=xpe`
+      // and expects a BotGuard-derived PoToken, so fetching it ourselves yields HTTP 200 with an
+      // empty body. The player's *own* caption request carries every param it needs (including
+      // the token), so instead of rebuilding that URL we watch fetch/XHR for it and reuse it
+      // verbatim. This is what makes captions work on videos where the constructed URL 200s empty.
+      window.__tbTimedTextURLs = [];
+      function absoluteURL(u) {
+        try { return new URL(u, location.href).href; } catch (e) { return String(u); }
+      }
+      function recordTimedText(raw) {
+        if (!raw) return;
+        var s = String(raw);
+        if (s.indexOf('/api/timedtext') < 0) return;
+        s = absoluteURL(s);
+        if (window.__tbTimedTextURLs.indexOf(s) >= 0) return;
+        window.__tbTimedTextURLs.push(s);
+        if (window.__tbTimedTextURLs.length > 24) window.__tbTimedTextURLs.shift();
+        post('tbTimedText', s);
+      }
+      try {
+        var _fetch = window.fetch;
+        if (typeof _fetch === 'function') {
+          window.fetch = function(input) {
+            try { recordTimedText(typeof input === 'string' ? input : (input && input.url)); } catch (e) {}
+            return _fetch.apply(this, arguments);
+          };
+        }
+      } catch (e) {}
+      try {
+        var _xhrOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          try { recordTimedText(url); } catch (e) {}
+          return _xhrOpen.apply(this, arguments);
+        };
+      } catch (e) {}
+      window.__tbResetCapture = function() {
+        window.__tbTimedTextURLs = [];
+        return true;
+      };
+      window.__tbCapturedURLs = function() { return window.__tbTimedTextURLs.slice(); };
+
       var style = document.createElement('style');
       style.textContent = [
-        '.ytp-caption-window-container{display:none !important;}',
+        // Hidden with opacity rather than display:none so YouTube keeps rendering and updating
+        // the native caption text — the live-caption fallback reads it out of this container.
+        '.ytp-caption-window-container,.caption-window,#player-captions-container{opacity:0 !important;pointer-events:none !important;}',
         '#tb-bilingual-caption{position:absolute;left:50%;bottom:9%;transform:translateX(-50%);',
         'max-width:min(92%,720px);z-index:2147483647;pointer-events:none;text-align:center;',
         'font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;}',
@@ -139,6 +177,80 @@ enum SubtitleExtractor {
         host.appendChild(el);
         return el;
       }
+      // --- caption activation ------------------------------------------------
+      // Nothing captures a timedtext URL unless the player actually asks for one, and it only
+      // does that when a caption track is switched on. Turn captions on through the player API
+      // (falling back to the toolbar toggle) — the native rendering stays invisible via CSS.
+      // `avoid` holds the target-language prefixes: a track already in the language we translate
+      // *into* is a poor source, so prefer any other track when the video offers a choice.
+      window.__tbEnableCaptions = function(avoid) {
+        var player = findPlayerContainer();
+        var api = (player && typeof player.getOption === 'function') ? player : null;
+        try { if (api && typeof api.loadModule === 'function') api.loadModule('captions'); } catch (e) {}
+        try {
+          if (api) {
+            var list = api.getOption('captions', 'tracklist') || [];
+            if (list.length) {
+              var avoidList = avoid || [];
+              var pick = null;
+              for (var i = 0; i < list.length && !pick; i++) {
+                var code = (list[i] && list[i].languageCode) || '';
+                var skip = false;
+                for (var j = 0; j < avoidList.length; j++) {
+                  if (code.indexOf(avoidList[j]) === 0) { skip = true; break; }
+                }
+                if (!skip) pick = list[i];
+              }
+              api.setOption('captions', 'track', pick || list[0]);
+            }
+          }
+        } catch (e) {}
+        try {
+          var btn = document.querySelector('.ytp-subtitles-button, .ytp-closed-captions-button');
+          if (btn && btn.getAttribute('aria-pressed') === 'false') btn.click();
+        } catch (e) {}
+        return window.__tbTimedTextURLs.length;
+      };
+
+      // --- live caption fallback ---------------------------------------------
+      // Last resort for videos whose track can't be downloaded at all: read whatever YouTube is
+      // painting into its own caption container and hand each new line to Swift to translate.
+      function readLiveCaption() {
+        var nodes = document.querySelectorAll('.ytp-caption-segment, .caption-visual-line, .captions-text span');
+        var parts = [];
+        for (var i = 0; i < nodes.length; i++) {
+          var t = (nodes[i].textContent || '').replace(/\\s+/g, ' ').trim();
+          if (t) parts.push(t);
+        }
+        return parts.join(' ').trim();
+      }
+      window.__tbLiveMode = false;
+      window.__tbSetLiveMode = function(on) {
+        window.__tbLiveMode = !!on;
+        lastLive = '';
+        return true;
+      };
+      window.__tbSetLiveTranslation = function(orig, trans) {
+        var overlay = ensureOverlay();
+        if (!overlay) return false;
+        var origEl = overlay.querySelector('#tb-caption-orig');
+        var transEl = overlay.querySelector('#tb-caption-trans');
+        origEl.textContent = orig || '';
+        if (trans) { transEl.textContent = trans; transEl.style.display = 'inline-block'; }
+        else { transEl.textContent = ''; transEl.style.display = 'none'; }
+        overlay.style.display = (orig || trans) ? 'block' : 'none';
+        return true;
+      };
+      var lastLive = '';
+      function liveTick() {
+        if (!window.__tbLiveMode || window.__tbSubs.length) return;
+        var text = readLiveCaption();
+        if (text === lastLive) return;
+        lastLive = text;
+        ensureOverlay();
+        post('tbLiveCaption', text);
+      }
+
       function findCue(t) {
         var subs = window.__tbSubs;
         // Binary-ish linear scan is fine for typical caption counts; prefer exact window, then
@@ -186,16 +298,19 @@ enum SubtitleExtractor {
       document.addEventListener('seeked', function(e) {
         if (e.target && e.target.tagName === 'VIDEO') { lastIndex = -2; tick(); }
       }, true);
-      setInterval(tick, 250);
+      setInterval(function() { tick(); liveTick(); }, 250);
 
       window.__tbSetSubtitles = function(subs) {
         window.__tbSubs = Array.isArray(subs) ? subs : [];
+        window.__tbLiveMode = false;
         lastIndex = -2;
         tick();
       };
       window.__tbClearSubtitles = function() {
         window.__tbSubs = [];
+        window.__tbLiveMode = false;
         lastIndex = -2;
+        lastLive = '';
         var overlay = document.getElementById('tb-bilingual-caption');
         if (overlay) overlay.style.display = 'none';
       };
@@ -254,6 +369,48 @@ enum SubtitleExtractor {
             }
         }
         return []
+    }
+
+    /// Download a caption track from a URL the page itself requested (captured by the injected
+    /// script's fetch/XHR hook). These URLs already carry the session's PoToken and signature, so
+    /// they return real content on videos where a URL we rebuild by hand comes back empty.
+    static func fetchSubtitles(fromCapturedURL urlString: String, using webView: WKWebView?) async throws -> [Subtitle] {
+        // The player normally already asks for json3; try it verbatim first so nothing that makes
+        // the URL valid gets disturbed, then retry with an explicit format if the body isn't usable.
+        var candidates = [urlString]
+        candidates.append(contentsOf: captionURLCandidates(from: urlString).filter { $0 != urlString })
+
+        var lastError: Error?
+        for candidate in candidates {
+            do {
+                let body: String
+                if let webView,
+                   let viaPage = try await fetchBodyViaWebView(candidate, webView: webView),
+                   !viaPage.isEmpty {
+                    body = viaPage
+                } else {
+                    body = try await fetchBodyViaURLSession(candidate)
+                }
+                let parsed = parseCaptionBody(body)
+                if !parsed.isEmpty { return parsed }
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError { throw lastError }
+        return []
+    }
+
+    /// Language of a timedtext URL, from its `lang`/`tlang` query params.
+    static func language(ofCapturedURL urlString: String) -> String {
+        guard let items = URLComponents(string: urlString)?.queryItems else { return "" }
+        if let tlang = items.first(where: { $0.name == "tlang" })?.value, !tlang.isEmpty { return tlang }
+        return items.first(where: { $0.name == "lang" })?.value ?? ""
+    }
+
+    /// True when the URL points at an auto-generated (ASR) track.
+    static func isASR(capturedURL urlString: String) -> Bool {
+        URLComponents(string: urlString)?.queryItems?.contains { $0.name == "kind" && $0.value == "asr" } ?? false
     }
 
     private static func pickTrack(from tracks: [CaptionTrack], preferring languageCode: String) -> CaptionTrack? {
@@ -381,10 +538,7 @@ enum SubtitleExtractor {
     private static func fetchBodyViaURLSession(_ urlString: String) async throws -> String {
         guard let url = URL(string: urlString) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-            forHTTPHeaderField: "User-Agent"
-        )
+        request.setValue(UserAgent.mobileSafari, forHTTPHeaderField: "User-Agent")
         request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
         request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
         let (data, response) = try await URLSession.shared.data(for: request)

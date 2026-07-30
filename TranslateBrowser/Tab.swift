@@ -33,6 +33,13 @@ final class Tab: ObservableObject, Identifiable {
     private var lastLoadedVideoID: String?
     private var extractionTask: Task<Void, Never>?
 
+    /// timedtext URLs the page requested for itself, reported by the injected script.
+    private var capturedTimedTextURLs: [String] = []
+    /// Live-caption fallback state: the line currently on screen, plus a cache so a repeated
+    /// line (YouTube re-renders the same text often) costs at most one translation call.
+    private var liveTranslationCache: [String: String] = [:]
+    private var liveTranslationTask: Task<Void, Never>?
+
     init(urlText: String, isPrivate: Bool = false) {
         self.urlText = urlText
         self.isPrivate = isPrivate
@@ -83,12 +90,63 @@ final class Tab: ObservableObject, Identifiable {
         currentIndex = subtitles.indices.contains(index) ? index : nil
     }
 
+    func onTimedTextURLCaptured(_ urlString: String) {
+        guard !capturedTimedTextURLs.contains(urlString) else { return }
+        capturedTimedTextURLs.append(urlString)
+    }
+
+    /// Live-caption fallback: translate the line YouTube is currently showing and push it back
+    /// into the overlay. Only runs when no downloadable track was found for this video.
+    func onLiveCaption(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            evalJS("window.__tbSetLiveTranslation && window.__tbSetLiveTranslation('', '')")
+            return
+        }
+        if let cached = liveTranslationCache[trimmed] {
+            pushLiveTranslation(orig: trimmed, trans: cached)
+            return
+        }
+        pushLiveTranslation(orig: trimmed, trans: "")
+        guard !apiKey.isEmpty else { return }
+        liveTranslationTask?.cancel()
+        liveTranslationTask = Task { [weak self] in
+            guard let self else { return }
+            let service = TranslationService(
+                provider: self.provider,
+                apiKey: self.apiKey,
+                model: self.model.isEmpty ? self.provider.defaultModel : self.model
+            )
+            guard let translated = try? await service.translate(texts: [trimmed], to: self.targetLang).first,
+                  !translated.isEmpty, !Task.isCancelled else { return }
+            self.liveTranslationCache[trimmed] = translated
+            self.pushLiveTranslation(orig: trimmed, trans: translated)
+        }
+    }
+
+    private func pushLiveTranslation(orig: String, trans: String) {
+        guard let o = jsStringLiteral(orig), let t = jsStringLiteral(trans) else { return }
+        evalJS("window.__tbSetLiveTranslation && window.__tbSetLiveTranslation(\(o), \(t))")
+    }
+
+    /// JSON-encodes a Swift string into a JS string literal so caption text containing quotes,
+    /// backslashes, or newlines can't break out of the evaluated snippet.
+    private func jsStringLiteral(_ value: String) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
     private func clearSubtitleState() {
         extractionTask?.cancel()
+        liveTranslationTask?.cancel()
         subtitles = []
         currentIndex = nil
         lastLoadedVideoID = nil
         statusMessage = ""
+        capturedTimedTextURLs = []
+        liveTranslationCache = [:]
         evalJS("window.__tbClearSubtitles && window.__tbClearSubtitles()")
     }
 
@@ -121,59 +179,158 @@ final class Tab: ObservableObject, Identifiable {
         return id
     }
 
+    /// Caption acquisition, most-reliable strategy first:
+    ///  1. Turn captions on through the player API and reuse the timedtext URL the player
+    ///     requests for itself — it carries the PoToken, so it returns real content where a URL
+    ///     we rebuild from the player response 200s empty.
+    ///  2. The player response's own track list (works on videos that aren't PoToken-gated).
+    ///  3. InnerTube ANDROID_VR, which serves caption URLs that don't need a PoToken.
+    ///  4. Failing all of those, translate the captions YouTube paints on screen, line by line.
     private func extractAndTranslate() async {
         guard let webView else { return }
         let videoID = lastLoadedVideoID
         statusMessage = "正在获取字幕…"
         subtitles = []
         currentIndex = nil
+        capturedTimedTextURLs = []
+        liveTranslationCache = [:]
         _ = try? await webView.evaluateJavaScript("window.__tbClearSubtitles && window.__tbClearSubtitles()")
+        _ = try? await webView.evaluateJavaScript("window.__tbResetCapture && window.__tbResetCapture()")
 
-        // After SPA navigation the player/captions can lag; poll before giving up.
-        var tracks: [CaptionTrack] = []
-        for attempt in 0..<20 {
+        if let subs = await subtitlesFromPlayerRequest(webView: webView), !subs.isEmpty {
             if Task.isCancelled { return }
-            if let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
-               let data = json.data(using: .utf8),
-               let decoded = try? JSONDecoder().decode([CaptionTrack].self, from: data),
-               !decoded.isEmpty {
-                tracks = decoded
-                break
-            }
-            if attempt < 19 {
-                try? await Task.sleep(nanoseconds: 350_000_000)
-            }
+            await adopt(subs)
+            return
         }
+        if Task.isCancelled { return }
 
-        // Page tracks missing (or still loading): resolve via InnerTube ANDROID_VR.
+        // Strategies 2 & 3: track lists we resolve ourselves.
+        var tracks = await pollPageTracks(webView: webView)
         if tracks.isEmpty, let videoID {
             statusMessage = "正在通过备用通道获取字幕轨…"
             tracks = (try? await SubtitleExtractor.fetchTracksViaAndroidVR(videoID: videoID)) ?? []
         }
+        if Task.isCancelled { return }
 
-        guard !tracks.isEmpty else {
-            statusMessage = "该视频没有可用字幕"
-            return
-        }
-
-        let track = pickBestTrack(from: tracks)
-        statusMessage = "正在下载字幕（\(track.languageCode)）…"
-
-        do {
-            let subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
-            guard !subs.isEmpty else {
-                statusMessage = "字幕内容为空（可能被 YouTube 限制，请稍后重试）"
+        if !tracks.isEmpty {
+            let track = pickBestTrack(from: tracks)
+            statusMessage = "正在下载字幕（\(track.languageCode)）…"
+            let subs = (try? await SubtitleExtractor.fetchSubtitles(
+                from: track, videoID: videoID, using: webView
+            )) ?? []
+            if Task.isCancelled { return }
+            if !subs.isEmpty {
+                await adopt(subs)
                 return
             }
-            if Task.isCancelled { return }
-            subtitles = subs
-            statusMessage = "已提取 \(subs.count) 条字幕，开始翻译…"
-            await pushSubtitlesToPage()
-            await translateAll()
-        } catch {
-            if Task.isCancelled { return }
-            statusMessage = "字幕获取失败: \(error.localizedDescription)"
         }
+
+        await startLiveCaptionMode(webView: webView)
+    }
+
+    private func adopt(_ subs: [Subtitle]) async {
+        subtitles = subs
+        statusMessage = "已提取 \(subs.count) 条字幕，开始翻译…"
+        await pushSubtitlesToPage()
+        await translateAll()
+    }
+
+    /// Strategy 1. Switches a caption track on, then waits for the injected fetch/XHR hook to
+    /// report the URL the player asked for and downloads that exact URL.
+    private func subtitlesFromPlayerRequest(webView: WKWebView) async -> [Subtitle]? {
+        statusMessage = "正在开启字幕轨…"
+        // A URL that came back unusable won't become usable on a later pass, so remember which
+        // ones were already attempted rather than re-downloading them every poll.
+        var tried = Set<String>()
+        // The player may still be booting right after an SPA navigation, so keep nudging it.
+        for attempt in 0..<24 {
+            if Task.isCancelled { return nil }
+            _ = try? await webView.evaluateJavaScript("window.__tbEnableCaptions && window.__tbEnableCaptions(\(avoidLanguagesJSON()))")
+
+            let fresh = rankCapturedURLs(await capturedURLs(webView: webView).filter { !tried.contains($0) })
+            for url in fresh {
+                if Task.isCancelled { return nil }
+                tried.insert(url)
+                let lang = SubtitleExtractor.language(ofCapturedURL: url)
+                statusMessage = "正在下载字幕（\(lang.isEmpty ? "auto" : lang)）…"
+                let subs = (try? await SubtitleExtractor.fetchSubtitles(
+                    fromCapturedURL: url, using: webView
+                )) ?? []
+                if !subs.isEmpty { return subs }
+            }
+            if attempt < 23 {
+                try? await Task.sleep(nanoseconds: 350_000_000)
+            }
+        }
+        return nil
+    }
+
+    /// Merges URLs seen by the message handler with whatever the page has buffered, so a message
+    /// that arrived before this task started still counts.
+    private func capturedURLs(webView: WKWebView) async -> [String] {
+        var urls = capturedTimedTextURLs
+        if let json = try? await webView.evaluateJavaScript("JSON.stringify(window.__tbCapturedURLs ? window.__tbCapturedURLs() : [])") as? String,
+           let data = json.data(using: .utf8),
+           let fromPage = try? JSONDecoder().decode([String].self, from: data) {
+            for url in fromPage where !urls.contains(url) {
+                urls.append(url)
+            }
+        }
+        return urls
+    }
+
+    /// Prefer a manual track in a language we'd actually want to translate from: skip tracks
+    /// already in the target language, and treat ASR as a last resort.
+    private func rankCapturedURLs(_ urls: [String]) -> [String] {
+        let hints = targetLanguageHints()
+        func isTarget(_ url: String) -> Bool {
+            let lang = SubtitleExtractor.language(ofCapturedURL: url)
+            return hints.contains { lang.hasPrefix($0) }
+        }
+        func score(_ url: String) -> Int {
+            let lang = SubtitleExtractor.language(ofCapturedURL: url)
+            let asr = SubtitleExtractor.isASR(capturedURL: url)
+            if isTarget(url) { return asr ? 5 : 4 }
+            if lang.hasPrefix("en") { return asr ? 1 : 0 }
+            return asr ? 3 : 2
+        }
+        return urls.enumerated()
+            .sorted { lhs, rhs in
+                let left = score(lhs.element), right = score(rhs.element)
+                return left == right ? lhs.offset < rhs.offset : left < right
+            }
+            .map(\.element)
+    }
+
+    /// Strategy 4. No track could be downloaded, so mirror YouTube's on-screen captions instead
+    /// and translate each line as it appears.
+    private func startLiveCaptionMode(webView: WKWebView) async {
+        _ = try? await webView.evaluateJavaScript("window.__tbEnableCaptions && window.__tbEnableCaptions(\(avoidLanguagesJSON()))")
+        let enabled = (try? await webView.evaluateJavaScript("window.__tbSetLiveMode && window.__tbSetLiveMode(true)")) as? Bool
+        if enabled == true {
+            statusMessage = apiKey.isEmpty
+                ? "已启用实时字幕，请在设置中填写 API Key"
+                : "字幕无法下载，已切换到实时逐句翻译"
+        } else {
+            statusMessage = "该视频没有可用字幕"
+        }
+    }
+
+    /// After an SPA navigation the player response can lag behind the URL change; poll for it.
+    private func pollPageTracks(webView: WKWebView) async -> [CaptionTrack] {
+        for attempt in 0..<12 {
+            if Task.isCancelled { return [] }
+            if let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
+               let data = json.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode([CaptionTrack].self, from: data),
+               !decoded.isEmpty {
+                return decoded
+            }
+            if attempt < 11 {
+                try? await Task.sleep(nanoseconds: 350_000_000)
+            }
+        }
+        return []
     }
 
     /// Prefer manual English (good translation source), then other manual (non-target), then ASR.
@@ -209,6 +366,16 @@ final class Tab: ObservableObject, Identifiable {
         case "English": return ["en"]
         default: return []
         }
+    }
+
+    /// Target-language prefixes as a JS array literal, for `__tbEnableCaptions`.
+    private func avoidLanguagesJSON() -> String {
+        let hints = targetLanguageHints()
+        guard let data = try? JSONSerialization.data(withJSONObject: hints),
+              let json = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return json
     }
 
     private struct PageSubtitle: Encodable {

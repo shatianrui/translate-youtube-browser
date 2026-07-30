@@ -27,7 +27,8 @@ struct BrowserView: UIViewRepresentable {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "tbUrlChanged")
         contentController.add(context.coordinator, name: "tbActiveIndex")
-        contentController.add(context.coordinator, name: "tbFullscreenChanged")
+        contentController.add(context.coordinator, name: "tbTimedText")
+        contentController.add(context.coordinator, name: "tbLiveCaption")
         contentController.addUserScript(WKUserScript(
             source: SubtitleExtractor.bilingualOverlayJS,
             injectionTime: .atDocumentStart,
@@ -36,7 +37,9 @@ struct BrowserView: UIViewRepresentable {
         config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        // Mobile iPhone Safari UA so sites serve their phone layout (YouTube redirects to
+        // m.youtube.com), which fits the phone screen without desktop-width zooming out.
+        webView.customUserAgent = UserAgent.mobileSafari
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
@@ -127,9 +130,12 @@ struct BrowserView: UIViewRepresentable {
             case "tbActiveIndex":
                 guard let index = message.body as? Int else { return }
                 Task { @MainActor in tab.onActiveIndexChanged(index) }
-            case "tbFullscreenChanged":
-                guard let isFullscreen = message.body as? Bool else { return }
-                Task { @MainActor in OrientationLock.shared.setFullscreen(isFullscreen) }
+            case "tbTimedText":
+                guard let urlString = message.body as? String else { return }
+                Task { @MainActor in tab.onTimedTextURLCaptured(urlString) }
+            case "tbLiveCaption":
+                guard let text = message.body as? String else { return }
+                Task { @MainActor in tab.onLiveCaption(text) }
             default:
                 break
             }
