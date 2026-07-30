@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('tbDesktop', {
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   fetchText: (url, headers) => ipcRenderer.invoke('net:fetchText', url, headers),
   fetchInnerTubeTracks: (videoID) => ipcRenderer.invoke('net:fetchInnerTubeTracks', videoID),
+  translate: (request) => ipcRenderer.invoke('net:translate', request),
   onMenuNewTab: (cb) => {
     const handler = () => cb();
     ipcRenderer.on('menu-new-tab', handler);

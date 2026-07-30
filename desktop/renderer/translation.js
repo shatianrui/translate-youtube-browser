@@ -74,23 +74,40 @@ async function chat({ provider, apiKey, model, prompt, maxTokens, timeoutMs }) {
     };
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), resolvedTimeout);
-  let res;
-  try {
-    res = await fetch(meta.endpoint, {
-      method: 'POST',
+  const payload = JSON.stringify(body);
+  let status;
+  let raw;
+  if (window.tbDesktop?.translate) {
+    const result = await window.tbDesktop.translate({
+      url: meta.endpoint,
       headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
+      body: payload,
+      timeoutMs: resolvedTimeout,
     });
-  } finally {
-    clearTimeout(timer);
-  }
-
-  const raw = await res.text();
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300)}`);
+    status = result?.status ?? -1;
+    raw = result?.body || '';
+    if (!result?.ok) {
+      throw new Error(`HTTP ${status}: ${raw.slice(0, 300)}`);
+    }
+  } else {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), resolvedTimeout);
+    let res;
+    try {
+      res = await fetch(meta.endpoint, {
+        method: 'POST',
+        headers,
+        body: payload,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    status = res.status;
+    raw = await res.text();
+    if (!res.ok) {
+      throw new Error(`HTTP ${status}: ${raw.slice(0, 300)}`);
+    }
   }
   const json = JSON.parse(raw);
   let content = '';

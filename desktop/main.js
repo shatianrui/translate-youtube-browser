@@ -260,6 +260,44 @@ const INNERTUBE_CLIENTS = [
   },
 ];
 
+const TRANSLATION_HOSTS = new Set([
+  'api.openai.com',
+  'api.anthropic.com',
+  'openrouter.ai',
+  'api.x.ai',
+]);
+
+// LLM APIs commonly reject requests from Electron's file:// renderer origin.
+// Send supported-provider requests from the main process, where CORS does not apply.
+ipcMain.handle('net:translate', async (_event, request) => {
+  let url;
+  try {
+    url = new URL(request?.url);
+  } catch {
+    return { ok: false, status: -1, body: 'Invalid translation endpoint' };
+  }
+  if (url.protocol !== 'https:' || !TRANSLATION_HOSTS.has(url.hostname)) {
+    return { ok: false, status: -1, body: 'Unsupported translation endpoint' };
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = Math.min(Math.max(Number(request?.timeoutMs) || 60000, 1000), 120000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: request?.headers && typeof request.headers === 'object' ? request.headers : {},
+      body: typeof request?.body === 'string' ? request.body : '',
+      signal: controller.signal,
+    });
+    return { ok: response.ok, status: response.status, body: await response.text() };
+  } catch (err) {
+    return { ok: false, status: -1, body: String(err?.message || err) };
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 ipcMain.handle('net:fetchInnerTubeTracks', async (_event, videoID) => {
   if (typeof videoID !== 'string' || !/^[A-Za-z0-9_-]{10,12}$/.test(videoID)) {
     return [];
