@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; connect-src https: http:;" />
+  <title>译览</title>
+  <link rel="stylesheet" href="online.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="toolbar">
+      <div class="brand"><span class="signal"></span><strong>译览</strong><small>LIVE</small></div>
+      <form id="urlForm" class="url-form">
+        <input id="videoUrl" type="url" placeholder="粘贴 YouTube 视频链接" spellcheck="false" />
+        <button class="button primary" type="submit">观看</button>
+      </form>
+      <button id="btnSettings" class="button">翻译设置</button>
+    </header>
+
+    <section class="stage">
+      <webview id="player" allowpopups class="player" webpreferences="contextIsolation=yes, javascript=yes, webSecurity=yes"></webview>
+      <div id="captionOverlay" class="caption-overlay" aria-live="polite">
+        <p id="captionOriginal"></p>
+        <p id="captionTranslation"></p>
+      </div>
+      <div id="emptyStage" class="empty-stage">粘贴 YouTube 视频链接后开始观看</div>
+    </section>
+
+    <section class="control-strip">
+      <label>字幕轨 <select id="trackSelect" disabled></select></label>
+      <button id="btnReloadTrack" class="button" disabled>重新载入字幕</button>
+      <span id="status" class="status">等待视频链接</span>
+    </section>
+
+    <section class="cue-panel">
+      <div><span>当前字幕</span><strong id="cueTime">--:--</strong></div>
+      <p id="cueText">视频播放时，此处会同步显示当前原文与译文。</p>
+    </section>
+  </main>
+
+  <dialog id="settingsDialog" class="modal">
+    <form method="dialog" id="settingsForm" class="modal-card">
+      <h2>实时翻译设置</h2>
+      <label>翻译服务商<select id="settingProvider"></select></label>
+      <label>API Key<input id="settingApiKey" type="password" autocomplete="off" /></label>
+      <label>模型（可留空使用默认）<input id="settingModel" type="text" autocomplete="off" /></label>
+      <label>目标语言
+        <select id="settingTargetLang"><option>中文</option><option>English</option><option>日本語</option><option>한국어</option><option>Français</option><option>Deutsch</option><option>Español</option><option>Русский</option><option>繁體中文</option></select>
+      </label>
+      <p class="hint">字幕仅在当前和后续几句出现时请求翻译，减少等待与 API 用量。API Key 只保存在本机。</p>
+      <div class="actions"><button class="button" value="cancel">取消</button><button id="settingsSave" class="button primary" value="save">保存</button></div>
+    </form>
+  </dialog>
+  <script src="online.js" type="module"></script>
+</body>
+</html>

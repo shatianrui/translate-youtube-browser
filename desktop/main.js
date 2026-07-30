@@ -32,11 +32,11 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      webviewTag: false,
+      webviewTag: true,
     },
   });
 
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.loadFile(path.join(__dirname, 'renderer', 'online.html'));
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
