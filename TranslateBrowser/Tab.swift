@@ -197,108 +197,94 @@ final class Tab: ObservableObject, Identifiable {
             window.__tbClearCaptionCapture && window.__tbClearCaptionCapture();
             """)
 
-        // Wait out pre-roll ads so we capture content timedtext, not ad captions.
-        try? await Task.sleep(nanoseconds: 600_000_000)
-        if Task.isCancelled { return }
-        for _ in 0..<40 {
-            if Task.isCancelled { return }
-            let ad = try? await webView.evaluateJavaScript("""
-                (function() {
-                  var p = document.getElementById('movie_player')
-                    || document.querySelector('.html5-video-player');
-                  if (p && p.classList && (p.classList.contains('ad-showing')
-                      || p.classList.contains('ad-interrupting'))) return true;
-                  return !!document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay');
-                })()
-                """) as? Bool
-            if ad != true { break }
-            try? await Task.sleep(nanoseconds: 400_000_000)
-        }
-        // Clear anything captured during the ad break.
-        pendingCapturedBody = nil
-        _ = try? await webView.evaluateJavaScript(
-            "window.__tbClearCaptionCapture && window.__tbClearCaptionCapture();"
-        )
-        if Task.isCancelled { return }
-
-        // Turn native CC on ASAP — YouTube only emits pot-bearing timedtext while CC is active.
-        // Native text is CSS-hidden; we overlay bilingual captions in the same place.
-        _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
-
-        var tracks: [CaptionTrack] = []
-        for attempt in 0..<16 {
-            if Task.isCancelled { return }
-            if attempt == 0 || attempt == 4 || attempt == 8 {
-                _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
-            }
-            if let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
-               let data = json.data(using: .utf8),
-               let decoded = try? JSONDecoder().decode([CaptionTrack].self, from: data),
-               !decoded.isEmpty {
-                tracks = decoded
-                break
-            }
-            if attempt < 15 {
-                try? await Task.sleep(nanoseconds: 350_000_000)
-            }
-        }
-
-        if tracks.isEmpty, let videoID {
-            tracks = (try? await SubtitleExtractor.fetchTracksViaAndroidVR(videoID: videoID)) ?? []
-        }
-        if tracks.isEmpty, let videoID {
-            tracks = (try? await SubtitleExtractor.fetchTracksViaEmbedded(videoID: videoID)) ?? []
-        }
-
-        // Even without a track list, player capture may still succeed if CC can be toggled.
-        let track = tracks.isEmpty
-            ? CaptionTrack(baseUrl: "", languageCode: "en", kind: nil, name: nil)
-            : pickBestTrack(from: tracks)
-
         do {
             var subs: [Subtitle] = []
 
-            // Give the player a moment to fire timedtext after CC-on, then prefer that body.
-            for _ in 0..<6 {
-                if Task.isCancelled { return }
-                if let pending = pendingCapturedBody, pending.count > 20 {
-                    pendingCapturedBody = nil
-                    subs = SubtitleExtractor.parseCaptionBody(pending)
-                    if !subs.isEmpty { break }
-                }
-                try? await Task.sleep(nanoseconds: 500_000_000)
+            // Fast path: ANDROID/IOS InnerTube by video id — works even during ads / before CC.
+            if let videoID {
+                subs = (try? await SubtitleExtractor.fetchSubtitlesViaInnerTube(
+                    videoID: videoID,
+                    preferLang: "en"
+                )) ?? []
             }
 
             if subs.isEmpty {
-                // Up to 3 full fetch attempts — intermittent PoToken / race after ads.
-                for attempt in 0..<3 {
+                // Brief ad wait (don't block forever on sticky ad DOM).
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                if Task.isCancelled { return }
+                for _ in 0..<12 {
                     if Task.isCancelled { return }
-                    _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
-                    if attempt > 0 {
-                        pendingCapturedBody = nil
-                        _ = try? await webView.evaluateJavaScript(
-                            "window.__tbClearCaptionCapture && window.__tbClearCaptionCapture();"
-                        )
-                        try? await Task.sleep(nanoseconds: UInt64(800_000_000 * attempt))
+                    let ad = try? await webView.evaluateJavaScript("""
+                        (function() {
+                          var p = document.getElementById('movie_player')
+                            || document.querySelector('.html5-video-player');
+                          if (p && p.classList && (p.classList.contains('ad-showing')
+                              || p.classList.contains('ad-interrupting'))) return true;
+                          return !!document.querySelector('.ad-showing.ad-interrupting, .ytp-ad-player-overlay.ytp-ad-player-overlay-skip-or-preview');
+                        })()
+                        """) as? Bool
+                    if ad != true { break }
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                }
+                pendingCapturedBody = nil
+                _ = try? await webView.evaluateJavaScript(
+                    "window.__tbClearCaptionCapture && window.__tbClearCaptionCapture(); window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en');"
+                )
+
+                var tracks: [CaptionTrack] = []
+                for attempt in 0..<10 {
+                    if Task.isCancelled { return }
+                    if attempt == 0 || attempt == 3 || attempt == 6 {
+                        _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
                     }
-                    subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
-                    if !subs.isEmpty { break }
-                    if let pending = pendingCapturedBody {
-                        pendingCapturedBody = nil
-                        subs = SubtitleExtractor.parseCaptionBody(pending)
+                    if let json = try? await webView.evaluateJavaScript(SubtitleExtractor.captionTracksJS) as? String,
+                       let data = json.data(using: .utf8),
+                       let decoded = try? JSONDecoder().decode([CaptionTrack].self, from: data),
+                       !decoded.isEmpty {
+                        tracks = decoded
+                        break
+                    }
+                    if attempt < 9 {
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                    }
+                }
+                if tracks.isEmpty, let videoID {
+                    tracks = (try? await SubtitleExtractor.fetchTracksViaAndroid(videoID: videoID)) ?? []
+                }
+                let track = tracks.isEmpty
+                    ? CaptionTrack(baseUrl: "", languageCode: "en", kind: nil, name: nil)
+                    : pickBestTrack(from: tracks)
+
+                // Prefer any body already stolen by hooks.
+                if let pending = pendingCapturedBody, pending.count > 20 {
+                    pendingCapturedBody = nil
+                    subs = SubtitleExtractor.parseCaptionBody(pending)
+                }
+                if subs.isEmpty {
+                    for attempt in 0..<3 {
+                        if Task.isCancelled { return }
+                        _ = try? await webView.evaluateJavaScript("window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en')")
+                        if attempt > 0 {
+                            try? await Task.sleep(nanoseconds: UInt64(600_000_000 * attempt))
+                        }
+                        subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
                         if !subs.isEmpty { break }
+                        if let pending = pendingCapturedBody {
+                            pendingCapturedBody = nil
+                            subs = SubtitleExtractor.parseCaptionBody(pending)
+                            if !subs.isEmpty { break }
+                        }
                     }
                 }
             }
 
             guard !subs.isEmpty else {
-                statusMessage = "字幕获取被 YouTube 拦截，请点 ↻ 重试（已默认开启 CC）"
-                // Soft auto-retry a couple of times after player/CC settle — not an infinite loop.
+                statusMessage = "字幕获取被 YouTube 拦截，请点 ↻ 重试"
                 if captionFetchRetries < 2 {
                     captionFetchRetries += 1
                     let retryFor = videoID
                     Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
                         guard let self, !Task.isCancelled else { return }
                         guard self.subtitles.isEmpty, self.lastLoadedVideoID == retryFor else { return }
                         await self.extractAndTranslate()
@@ -310,10 +296,14 @@ final class Tab: ObservableObject, Identifiable {
             captionFetchRetries = 0
             subtitles = subs
             statusMessage = ""
+            // Keep CC on + reattach overlay (important after rotate / fullscreen).
+            _ = try? await webView.evaluateJavaScript("""
+                window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn('en');
+                window.__tbReattachOverlay && window.__tbReattachOverlay();
+                """)
             await pushSubtitlesToPage()
             startRealtimeTranslation()
 
-            // Prime the current cue translation immediately (immersive).
             if let playhead = await currentPlaybackTime() {
                 let center = indexNear(time: playhead)
                 if shouldTranslateIndex(center) {

@@ -335,10 +335,11 @@ enum SubtitleExtractor {
 
       function isAdShowing() {
         var p = findPlayerContainer();
-        if (p && p.classList && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting'))) {
+        if (p && p.classList && p.classList.contains('ad-showing')) {
           return true;
         }
-        return !!document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay');
+        // Require the skip/preview overlay — bare .ytp-ad-player-overlay can linger falsely.
+        return !!document.querySelector('.ad-showing .ytp-ad-player-overlay, .ad-showing.ad-interrupting');
       }
 
       /** Media clock used by YouTube's own CC — prefer player API over <video>.currentTime. */
@@ -414,9 +415,12 @@ enum SubtitleExtractor {
         '.ytp-caption-window-container .caption-visual-line{opacity:0 !important;height:0 !important;',
         'overflow:hidden !important;font-size:0 !important;padding:0 !important;margin:0 !important;}',
         '.ytp-caption-window-container{pointer-events:none !important;z-index:40 !important;}',
-        '#tb-caption-window{position:absolute;left:50%;bottom:10%;transform:translate(-50%,0);',
-        'max-width:90%;width:max-content;text-align:center;pointer-events:none;z-index:41;',
+        '#tb-caption-window{position:absolute;left:50%;bottom:8%;transform:translate(-50%,0);',
+        'max-width:92%;width:max-content;text-align:center;pointer-events:none;z-index:2147483000;',
         'font-family:"YouTube Noto",Roboto,Arial,Helvetica,sans-serif;display:none;}',
+        /* Keep captions readable in landscape / DOM fullscreen. */
+        ':fullscreen #tb-caption-window, :-webkit-full-screen #tb-caption-window{bottom:12%;',
+        'z-index:2147483000 !important;}',
         '#tb-caption-orig{color:#fff;font-size:clamp(13px,2.2vw,18px);line-height:1.35;',
         'text-shadow:0 0 2px #000,0 1px 3px rgba(0,0,0,.9);margin-bottom:2px;white-space:pre-wrap;',
         'background:rgba(8,8,8,.55);padding:2px 6px;border-radius:3px;display:inline-block;}',
@@ -574,6 +578,30 @@ enum SubtitleExtractor {
       }, true);
       document.addEventListener('fullscreenchange', bump);
       document.addEventListener('webkitfullscreenchange', bump);
+      // Landscape / rotate: YouTube rebuilds player chrome — reattach overlay + keep translating.
+      window.__tbReattachOverlay = function() {
+        try {
+          lastIndex = -2;
+          lastSig = '';
+          ensureOverlay();
+          tick(true);
+        } catch (e) {}
+      };
+      window.addEventListener('orientationchange', function() {
+        setTimeout(window.__tbReattachOverlay, 50);
+        setTimeout(window.__tbReattachOverlay, 350);
+        setTimeout(window.__tbReattachOverlay, 900);
+      });
+      window.addEventListener('resize', function() {
+        setTimeout(window.__tbReattachOverlay, 80);
+      });
+      try {
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener('resize', function() {
+            setTimeout(window.__tbReattachOverlay, 80);
+          });
+        }
+      } catch (e) {}
       // rAF: sample the player clock every frame while playing for tight A/V lock.
       (function rafLoop() {
         try { tick(false); } catch (e) {}
@@ -624,54 +652,55 @@ enum SubtitleExtractor {
         let error: String?
     }
 
-    /// Beat YouTube empty-body blocks:
-    ///  1) Intercept the player's own pot-bearing timedtext (CC kept ON by default)
-    ///  2) ANDROID_VR / embedded client timedtext URLs
-    ///  3) Direct download of the page track URL (often empty when exp=xpe)
+    /// Beat YouTube empty-body blocks.
+    /// Prefer ANDROID/IOS InnerTube signed timedtext (no WEB PoToken), then player capture.
     static func fetchSubtitles(
         from track: CaptionTrack,
         videoID: String?,
         using webView: WKWebView?
     ) async throws -> [Subtitle] {
-        // 1) Player-side capture first — with CC kept on, this is the most reliable pot path.
-        if let webView {
-            if let body = try await captureViaPlayer(webView: webView, preferLang: track.languageCode.isEmpty ? "en" : track.languageCode) {
-                let parsed = parseCaptionBody(body)
-                if !parsed.isEmpty { return parsed }
-            }
-        }
-
-        // 2) InnerTube clients that often expose timedtext without WEB PoToken.
+        // 1) InnerTube ANDROID/IOS first — most reliable in 2025/2026 (no WEB PoToken).
         if let videoID {
-            let vrTracks = (try? await fetchTracksViaAndroidVR(videoID: videoID)) ?? []
-            let embedTracks = vrTracks.isEmpty
-                ? ((try? await fetchTracksViaEmbedded(videoID: videoID)) ?? [])
-                : []
-            let altTracks = vrTracks.isEmpty ? embedTracks : vrTracks
-            if !altTracks.isEmpty {
-                let preferred = pickTrack(from: altTracks, preferring: track.languageCode) ?? altTracks.first
-                if let preferred {
-                    let vrSubs = try await downloadTrack(preferred, using: webView)
-                    if !vrSubs.isEmpty { return vrSubs }
-                }
-                for t in altTracks {
-                    let subs = try await downloadTrack(t, using: webView)
-                    if !subs.isEmpty { return subs }
-                }
-            }
+            let viaTube = try await fetchSubtitlesViaInnerTube(videoID: videoID, preferLang: track.languageCode)
+            if !viaTube.isEmpty { return viaTube }
         }
 
-        // 3) Last resort: naked page track URL
-        if !track.baseUrl.isEmpty {
-            let direct = try await downloadTrack(track, using: webView)
-            if !direct.isEmpty { return direct }
-        }
-
-        // 4) One more player capture after alternatives failed (CC may have just become ready).
+        // 2) Player-side capture (pot-bearing timedtext while native CC is on).
         if let webView {
             if let body = try await captureViaPlayer(webView: webView, preferLang: track.languageCode.isEmpty ? "en" : track.languageCode) {
                 let parsed = parseCaptionBody(body)
                 if !parsed.isEmpty { return parsed }
+            }
+        }
+
+        // 3) Last resort: naked page track URL (often empty when exp=xpe / pot gated).
+        if !track.baseUrl.isEmpty {
+            let direct = try await downloadTrack(track, using: nil) // URLSession only — avoid page pot gates
+            if !direct.isEmpty { return direct }
+            if let webView {
+                let viaPage = try await downloadTrack(track, using: webView)
+                if !viaPage.isEmpty { return viaPage }
+            }
+        }
+        return []
+    }
+
+    /// Fetch caption cues using ANDROID → IOS → ANDROID_VR InnerTube clients + URLSession.
+    static func fetchSubtitlesViaInnerTube(videoID: String, preferLang: String) async throws -> [Subtitle] {
+        let trackLists: [[CaptionTrack]] = [
+            (try? await fetchTracksViaAndroid(videoID: videoID)) ?? [],
+            (try? await fetchTracksViaIOS(videoID: videoID)) ?? [],
+            (try? await fetchTracksViaAndroidVR(videoID: videoID)) ?? [],
+        ]
+        for tracks in trackLists where !tracks.isEmpty {
+            let preferred = pickTrack(from: tracks, preferring: preferLang.isEmpty ? "en" : preferLang)
+            let ordered = ([preferred].compactMap { $0 } + tracks).reduce(into: [CaptionTrack]()) { acc, t in
+                if !acc.contains(where: { $0.baseUrl == t.baseUrl }) { acc.append(t) }
+            }
+            for t in ordered {
+                // Always URLSession for InnerTube signed URLs — page fetch can pot-gate them.
+                let subs = try await downloadTrack(t, using: nil)
+                if !subs.isEmpty { return subs }
             }
         }
         return []
@@ -679,7 +708,22 @@ enum SubtitleExtractor {
 
     @MainActor
     private static func captureViaPlayer(webView: WKWebView, preferLang: String) async throws -> String? {
-        _ = try? await webView.evaluateJavaScript("window.__tbClearCaptionCapture && window.__tbClearCaptionCapture()")
+        // Force a fresh timedtext request: clear, toggle CC off→on.
+        _ = try? await webView.evaluateJavaScript("""
+            (function() {
+              try { window.__tbClearCaptionCapture && window.__tbClearCaptionCapture(); } catch (e) {}
+              try {
+                var p = document.getElementById('movie_player')
+                  || document.getElementById('shorts-player')
+                  || document.querySelector('.html5-video-player');
+                if (p && p.setOption) p.setOption('captions', 'track', {});
+              } catch (e) {}
+            })();
+            """)
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        _ = try? await webView.evaluateJavaScript(
+            "window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn(\(jsonString(preferLang.isEmpty ? "en" : preferLang)))"
+        )
         let rawValue = try await webView.callAsyncJavaScript(
             requestCaptionsAsyncJS,
             arguments: ["preferLang": preferLang.isEmpty ? "en" : preferLang],
@@ -695,6 +739,11 @@ enum SubtitleExtractor {
         return result.body
     }
 
+    private static func jsonString(_ s: String) -> String {
+        let data = try? JSONSerialization.data(withJSONObject: s)
+        return data.flatMap { String(data: $0, encoding: .utf8) } ?? "\"en\""
+    }
+
     private static func pickTrack(from tracks: [CaptionTrack], preferring languageCode: String) -> CaptionTrack? {
         if let exact = tracks.first(where: { $0.languageCode == languageCode && $0.kind != "asr" }) {
             return exact
@@ -706,6 +755,9 @@ enum SubtitleExtractor {
         if let en = tracks.first(where: { $0.languageCode.hasPrefix("en") && $0.kind != "asr" }) {
             return en
         }
+        if let enAsr = tracks.first(where: { $0.languageCode.hasPrefix("en") }) {
+            return enAsr
+        }
         return tracks.first(where: { $0.kind != "asr" }) ?? tracks.first
     }
 
@@ -713,6 +765,7 @@ enum SubtitleExtractor {
         let base = track.baseUrl
             .replacingOccurrences(of: "\\u0026", with: "&")
             .replacingOccurrences(of: "\\/", with: "/")
+        guard !base.isEmpty else { return [] }
 
         let candidates = captionURLCandidates(from: base)
         var lastError: Error?
@@ -722,11 +775,13 @@ enum SubtitleExtractor {
                 let body: String
                 if let webView,
                    let viaPage = try await fetchBodyViaWebView(urlString, webView: webView),
-                   !viaPage.isEmpty {
+                   viaPage.count > 20,
+                   !isEmptyTimedtextBody(viaPage) {
                     body = viaPage
                 } else {
                     body = try await fetchBodyViaURLSession(urlString)
                 }
+                if isEmptyTimedtextBody(body) { continue }
                 let parsed = parseCaptionBody(body)
                 if !parsed.isEmpty { return parsed }
             } catch {
@@ -735,6 +790,42 @@ enum SubtitleExtractor {
         }
         if let lastError { throw lastError }
         return []
+    }
+
+    private static func isEmptyTimedtextBody(_ body: String) -> Bool {
+        let t = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty || t == "{}" || t == "[]" || t == "null"
+    }
+
+    static func fetchTracksViaAndroid(videoID: String) async throws -> [CaptionTrack] {
+        try await fetchTracksViaInnerTube(
+            videoID: videoID,
+            clientName: "ANDROID",
+            clientVersion: "20.10.38",
+            userAgent: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+            clientNameHeader: "3",
+            extraClient: [
+                "androidSdkVersion": 34,
+                "osName": "Android",
+                "osVersion": "14",
+            ]
+        )
+    }
+
+    static func fetchTracksViaIOS(videoID: String) async throws -> [CaptionTrack] {
+        try await fetchTracksViaInnerTube(
+            videoID: videoID,
+            clientName: "IOS",
+            clientVersion: "20.10.4",
+            userAgent: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)",
+            clientNameHeader: "5",
+            extraClient: [
+                "deviceMake": "Apple",
+                "deviceModel": "iPhone16,2",
+                "osName": "iPhone",
+                "osVersion": "17.5.0",
+            ]
+        )
     }
 
     static func fetchTracksViaAndroidVR(videoID: String) async throws -> [CaptionTrack] {
@@ -869,7 +960,7 @@ enum SubtitleExtractor {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+            "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
             forHTTPHeaderField: "User-Agent"
         )
         request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
