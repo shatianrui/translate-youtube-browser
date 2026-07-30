@@ -14,6 +14,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify iOS fullscreen and subtitle integration contract
+        run: node tests/ios_source_contract.mjs
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

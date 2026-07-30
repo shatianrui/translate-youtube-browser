@@ -14,9 +14,9 @@ struct BrowserView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        // Let YouTube's fullscreen button use the standards Fullscreen API on the player's own
-        // DOM container (which our injected script redirects it to) instead of falling back to
-        // a separate native full-screen video controller that would cover our caption overlay.
+        // Enable the standards Fullscreen API when YouTube uses it. Native video fullscreen is
+        // also preserved: iOS WKWebView presents that player itself, which is more reliable than
+        // replacing webkitEnterFullscreen in page JavaScript.
         config.preferences.isElementFullscreenEnabled = true
         // Private tabs get an ephemeral, non-persistent data store: no cookies, cache, or
         // history survive once the tab is closed, matching Safari's private browsing.
@@ -27,6 +27,7 @@ struct BrowserView: UIViewRepresentable {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "tbUrlChanged")
         contentController.add(context.coordinator, name: "tbActiveIndex")
+        contentController.add(context.coordinator, name: "tbFullscreenChanged")
         contentController.addUserScript(WKUserScript(
             source: SubtitleExtractor.bilingualOverlayJS,
             injectionTime: .atDocumentStart,
@@ -126,9 +127,26 @@ struct BrowserView: UIViewRepresentable {
             case "tbActiveIndex":
                 guard let index = message.body as? Int else { return }
                 Task { @MainActor in tab.onActiveIndexChanged(index) }
+            case "tbFullscreenChanged":
+                guard let isFullscreen = message.body as? Bool else { return }
+                Task { @MainActor in OrientationLock.shared.setFullscreen(isFullscreen) }
             default:
                 break
             }
+        }
+
+        /// WKWebView does not create a second window for target=_blank by itself. YouTube can
+        /// use that path for player/watch links, so load it in the current tab rather than
+        /// silently dropping the navigation.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            guard navigationAction.targetFrame == nil else { return nil }
+            webView.load(navigationAction.request)
+            return nil
         }
 
         // Safari-style long-press link menu: open in a new tab, or copy the link.

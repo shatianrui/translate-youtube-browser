@@ -83,6 +83,21 @@ enum SubtitleExtractor {
         document.addEventListener(evt, notifyURL, true);
       });
       window.addEventListener('popstate', notifyURL);
+
+      // Do not replace webkitEnterFullscreen: doing so stops WKWebView from presenting the
+      // native iOS video player. Listen to both native-video and DOM fullscreen events instead
+      // and let Swift lock the app to landscape while playback is fullscreen.
+      function notifyFullscreen(isFullscreen) { post('tbFullscreenChanged', !!isFullscreen); }
+      document.addEventListener('fullscreenchange', function() { notifyFullscreen(document.fullscreenElement); }, true);
+      document.addEventListener('webkitfullscreenchange', function() {
+        notifyFullscreen(document.webkitFullscreenElement);
+      }, true);
+      document.addEventListener('webkitbeginfullscreen', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') notifyFullscreen(true);
+      }, true);
+      document.addEventListener('webkitendfullscreen', function(e) {
+        if (e.target && e.target.tagName === 'VIDEO') notifyFullscreen(false);
+      }, true);
       var _ps = history.pushState;
       history.pushState = function() { var r = _ps.apply(this, arguments); setTimeout(notifyURL, 0); return r; };
       var _rs = history.replaceState;
@@ -194,23 +209,6 @@ enum SubtitleExtractor {
         if (overlay) overlay.style.display = 'none';
       };
 
-      try {
-        var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
-        if (proto && proto.webkitEnterFullscreen) {
-          var original = proto.webkitEnterFullscreen;
-          proto.webkitEnterFullscreen = function() {
-            var self = this;
-            var args = arguments;
-            var container = findPlayerContainer();
-            var host = container && (container.querySelector('.html5-video-player') || container);
-            if (host && host.requestFullscreen) {
-              host.requestFullscreen().catch(function() { original.apply(self, args); });
-            } else {
-              original.apply(self, args);
-            }
-          };
-        }
-      } catch (e) {}
     })();
     """
 
