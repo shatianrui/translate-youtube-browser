@@ -77,7 +77,7 @@ enum SubtitleExtractor {
       function isTimedtext(url) { return url && String(url).indexOf('/api/timedtext') !== -1; }
       function captureTimedtext(url, body) {
         if (!isTimedtext(url) || !body || String(body).length < 20) return;
-        var text = String(body).replace(/^\s+/, '');
+        var text = String(body).trim();
         if (!text || text === '{}' || text === '[]') return;
         window.__tbCapturedBody = String(body);
         post('tbCaptionBody', { body: String(body) });
