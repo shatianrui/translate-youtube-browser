@@ -28,6 +28,7 @@ struct BrowserView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "tbUrlChanged")
         contentController.add(context.coordinator, name: "tbActiveIndex")
         contentController.add(context.coordinator, name: "tbFullscreenChanged")
+        contentController.add(context.coordinator, name: "tbCaptionBody")
         contentController.addUserScript(WKUserScript(
             source: SubtitleExtractor.bilingualOverlayJS,
             injectionTime: .atDocumentStart,
@@ -134,6 +135,9 @@ struct BrowserView: UIViewRepresentable {
                 Task { @MainActor in
                     OrientationLock.shared.setFullscreen(isFullscreen, in: self.webView?.window?.windowScene)
                 }
+            case "tbCaptionBody":
+                guard let payload = message.body as? [String: Any], let body = payload["body"] as? String else { return }
+                Task { @MainActor in tab.onCapturedCaptionBody(body) }
             default:
                 break
             }

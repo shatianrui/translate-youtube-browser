@@ -32,6 +32,7 @@ final class Tab: ObservableObject, Identifiable {
 
     private var lastLoadedVideoID: String?
     private var extractionTask: Task<Void, Never>?
+    private var pendingCapturedBody: String?
 
     init(urlText: String, isPrivate: Bool = false) {
         self.urlText = urlText
@@ -83,6 +84,10 @@ final class Tab: ObservableObject, Identifiable {
         currentIndex = subtitles.indices.contains(index) ? index : nil
     }
 
+    func onCapturedCaptionBody(_ body: String) {
+        pendingCapturedBody = body
+    }
+
     private func clearSubtitleState() {
         extractionTask?.cancel()
         subtitles = []
@@ -127,7 +132,25 @@ final class Tab: ObservableObject, Identifiable {
         statusMessage = "正在获取字幕…"
         subtitles = []
         currentIndex = nil
-        _ = try? await webView.evaluateJavaScript("window.__tbClearSubtitles && window.__tbClearSubtitles()")
+        pendingCapturedBody = nil
+        _ = try? await webView.evaluateJavaScript("window.__tbClearSubtitles && window.__tbClearSubtitles(); window.__tbClearCaptionCapture && window.__tbClearCaptionCapture(); window.__tbEnsureCaptionsOn && window.__tbEnsureCaptionsOn()")
+
+        // Captured player traffic is the first choice: page track URLs can return HTTP 200 but
+        // an empty body without the player's PoToken. Give native CC time to issue that request.
+        for _ in 0..<16 {
+            if Task.isCancelled { return }
+            if let body = pendingCapturedBody {
+                let captured = SubtitleExtractor.parseCaptionBody(body)
+                if !captured.isEmpty {
+                    subtitles = captured
+                    statusMessage = "已提取 \(captured.count) 条字幕，开始翻译…"
+                    await pushSubtitlesToPage()
+                    await translateAll()
+                    return
+                }
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
 
         // After SPA navigation the player/captions can lag; poll before giving up.
         var tracks: [CaptionTrack] = []

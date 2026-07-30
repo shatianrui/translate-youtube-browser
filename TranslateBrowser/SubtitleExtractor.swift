@@ -72,6 +72,40 @@ enum SubtitleExtractor {
       if (window.__tbInstalled) return;
       window.__tbInstalled = true;
       window.__tbSubs = [];
+      window.__tbCapturedBody = null;
+
+      function isTimedtext(url) { return url && String(url).indexOf('/api/timedtext') !== -1; }
+      function captureTimedtext(url, body) {
+        if (!isTimedtext(url) || !body || String(body).length < 20) return;
+        var text = String(body).replace(/^\s+/, '');
+        if (!text || text === '{}' || text === '[]') return;
+        window.__tbCapturedBody = String(body);
+        post('tbCaptionBody', { body: String(body) });
+      }
+      // Capture the response that YouTube's player itself authorized with its current PoToken.
+      try {
+        var nativeFetch = window.fetch;
+        window.fetch = function() {
+          var args = arguments, input = args[0];
+          var url = typeof input === 'string' ? input : (input && input.url);
+          return nativeFetch.apply(this, args).then(function(res) {
+            if (isTimedtext(url)) res.clone().text().then(function(body) { captureTimedtext(url, body); }).catch(function() {});
+            return res;
+          });
+        };
+      } catch (e) {}
+      window.__tbEnsureCaptionsOn = function() {
+        var player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+        if (!player) return false;
+        try { if (player.loadModule) player.loadModule('captions'); } catch (e) {}
+        try { if (player.toggleSubtitlesOn) player.toggleSubtitlesOn(); } catch (e) {}
+        try {
+          var button = document.querySelector('.ytp-subtitles-button');
+          if (button && button.getAttribute('aria-pressed') !== 'true') button.click();
+        } catch (e) {}
+        return true;
+      };
+      window.__tbClearCaptionCapture = function() { window.__tbCapturedBody = null; };
 
       function post(name, payload) {
         try { window.webkit.messageHandlers[name].postMessage(payload); } catch (e) {}

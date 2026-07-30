@@ -47,4 +47,18 @@ assert.match(subtitleScript, /func fetchBodyViaWebView[\s\S]*withCheckedThrowing
 assert.match(subtitleScript, /func fetchBodyViaWebView[\s\S]*guard let raw = rawValue as\? String/,
   'The bridged in-page response must be decoded before URLSession fallback');
 
+assert.match(subtitleScript, /function captureTimedtext[\s\S]*post\('tbCaptionBody'/,
+  'The injected page script must forward the player’s own PoToken-authorized timedtext body');
+assert.match(subtitleScript, /window\.fetch = function\(\)[\s\S]*res\.clone\(\)\.text\(\)[\s\S]*captureTimedtext/,
+  'The injected page script must capture player timedtext responses');
+assert.match(subtitleScript, /window\.__tbEnsureCaptionsOn = function/,
+  'The injected page script must enable native CC to cause YouTube to issue timedtext requests');
+assert.match(browserView, /contentController\.add\(context\.coordinator, name: "tbCaptionBody"\)[\s\S]*case "tbCaptionBody"[\s\S]*tab\.onCapturedCaptionBody/,
+  'BrowserView must forward captured player caption bodies to the active tab');
+const tab = read('TranslateBrowser/Tab.swift');
+assert.match(tab, /func onCapturedCaptionBody\(_ body: String\)/,
+  'Tab must retain player-captured timedtext for extraction');
+assert.match(tab, /pendingCapturedBody[\s\S]*SubtitleExtractor\.parseCaptionBody/,
+  'Tab must prefer the player-captured timedtext body before brittle fallback downloads');
+
 console.log('iOS fullscreen/landscape source contract passed');
