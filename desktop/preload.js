@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('tbDesktop', {
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   getGuestPreloadPath: () => ipcRenderer.invoke('app:getGuestPreloadPath'),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  saveSubtitles: (payload) => ipcRenderer.invoke('subtitles:save', payload),
   fetchText: (url, headers) => ipcRenderer.invoke('net:fetchText', url, headers),
   fetchInnerTubeTracks: (videoID) => ipcRenderer.invoke('net:fetchInnerTubeTracks', videoID),
   translate: (request) => ipcRenderer.invoke('net:translate', request),

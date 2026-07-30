@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu, dialog } = require('electron');
+const fs = require('fs/promises');
 const path = require('path');
 const Store = require('electron-store');
 
@@ -31,7 +32,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      webviewTag: true,
+      webviewTag: false,
     },
   });
 
@@ -73,28 +74,6 @@ function buildMenu() {
         }]
       : []),
     {
-      label: '文件',
-      submenu: [
-        {
-          label: '新建标签页',
-          accelerator: 'CmdOrCtrl+T',
-          click: () => mainWindow?.webContents.send('menu-new-tab'),
-        },
-        {
-          label: '新建隐私标签页',
-          accelerator: 'CmdOrCtrl+Shift+N',
-          click: () => mainWindow?.webContents.send('menu-new-private-tab'),
-        },
-        {
-          label: '关闭标签页',
-          accelerator: 'CmdOrCtrl+W',
-          click: () => mainWindow?.webContents.send('menu-close-tab'),
-        },
-        { type: 'separator' },
-        isMac ? { role: 'close' } : { role: 'quit', label: '退出' },
-      ],
-    },
-    {
       label: '编辑',
       submenu: [
         { role: 'undo', label: '撤销' },
@@ -117,15 +96,6 @@ function buildMenu() {
         { role: 'zoomOut', label: '缩小' },
         { type: 'separator' },
         { role: 'togglefullscreen', label: '全屏' },
-      ],
-    },
-    {
-      label: '帮助',
-      submenu: [
-        {
-          label: '打开 YouTube',
-          click: () => mainWindow?.webContents.send('menu-open-youtube'),
-        },
       ],
     },
   ];
@@ -184,6 +154,20 @@ ipcMain.handle('shell:openExternal', (_event, url) => {
 ipcMain.handle('app:getGuestPreloadPath', () => path.join(__dirname, 'guest-preload.js'));
 
 ipcMain.handle('app:getVersion', () => app.getVersion());
+
+ipcMain.handle('subtitles:save', async (_event, { content, defaultPath }) => {
+  if (typeof content !== 'string' || !content) return false;
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: typeof defaultPath === 'string' ? defaultPath : 'subtitles.srt',
+    filters: [
+      { name: 'Subtitle files', extensions: ['srt', 'txt'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (canceled || !filePath) return false;
+  await fs.writeFile(filePath, content, 'utf8');
+  return true;
+});
 
 // ---- Network helpers (main process = no CORS) ----
 

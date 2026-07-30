@@ -1,14 +1,14 @@
-# 译览 · Windows 桌面端
+# 译览字幕台 · Windows 桌面端
 
-Electron 多标签浏览器，复刻 iOS「译览」的核心能力：打开 YouTube 视频后自动提取字幕，调用 ChatGPT / Claude / OpenRouter / Grok 翻译，并在播放器内叠加原文 + 译文双语字幕。
+独立 YouTube 字幕提取与翻译工具。粘贴视频链接后，应用通过原生网络通道读取公开字幕轨，调用 ChatGPT / Claude / OpenRouter / Grok 翻译，并在本地查看或导出双语字幕。
 
 ## 功能
 
-- 多标签浏览（普通 / 隐私分区）
-- 地址栏导航、前进 / 后退 / 刷新、收藏夹
-- YouTube SPA 导航感知（切视频自动重新抽字幕）
-- InnerTube `ANDROID_VR` 备用字幕通道（绕过部分 PoToken 限制）
-- 播放器 DOM 内双语字幕（全屏仍可见）
+- 粘贴视频链接并选择可用字幕轨
+- 主进程 InnerTube 多客户端通道，不依赖页面注入或浏览器播放状态
+- 原文与译文按时间轴并排显示
+- 导出双语 SRT 或 TXT
+- 翻译请求从主进程发送，避免 Electron `file://` CORS 限制
 - 设置项本机持久化（`electron-store`）
 
 ## 开发
@@ -48,19 +48,13 @@ GitHub Actions 工作流：`.github/workflows/build-windows.yml`（push / PR 变
 
 ## 使用
 
-1. 启动后默认打开 YouTube
-2. 打开「设置」，选择服务商并填写 API Key
-3. 进入任意带字幕的视频页，等待状态栏提示提取 / 翻译完成
-4. 字幕会出现在播放器底部；也可点工具栏「字幕列表」浏览全文
+1. 打开「翻译设置」，选择服务商并填写 API Key
+2. 粘贴任意 YouTube 视频链接，点击「获取字幕」
+3. 选择字幕轨并点击「载入此轨」
+4. 点击「翻译全部」，可导出双语 SRT 或 TXT
 
 API Key 只保存在本机用户目录，不会上传到本项目服务器。
 
 ## 字幕为空？
 
-YouTube 现在对 WEB 字幕接口要求 PoToken。译览会：
-
-1. 拦截播放器自己的 timedtext 下载（自带 PoToken）
-2. 回退到页面「文字稿」面板抓取
-3. 再尝试 InnerTube 多客户端备用通道
-
-若仍提示为空，点工具栏刷新重试，并确认该视频本身有字幕。
+应用只使用 InnerTube 的 Android、iOS 与嵌入式客户端读取公开字幕轨，不会尝试控制 YouTube 播放器。若仍提示为空，请确认该视频确实公开提供字幕；受地区、年龄或权限限制的视频可能无法读取。

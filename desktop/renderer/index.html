@@ -5,32 +5,42 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https:; connect-src https: http:; media-src * blob:;">
   <title>译览</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="workspace.css" />
 </head>
 <body>
-  <div id="app">
-    <header class="chrome">
-      <div class="tabs-bar" id="tabsBar"></div>
-      <div class="toolbar">
-        <button class="icon-btn" id="btnBack" title="后退" aria-label="后退">‹</button>
-        <button class="icon-btn" id="btnForward" title="前进" aria-label="前进">›</button>
-        <button class="icon-btn" id="btnReload" title="刷新" aria-label="刷新">↻</button>
-        <form id="addressForm" class="address-form" autocomplete="off">
-          <input id="addressInput" type="text" placeholder="输入网址或搜索" spellcheck="false" />
-        </form>
-        <button class="icon-btn" id="btnBookmark" title="收藏" aria-label="收藏">☆</button>
-        <button class="icon-btn" id="btnBookmarks" title="收藏夹" aria-label="收藏夹">☰</button>
-        <button class="icon-btn" id="btnSubtitles" title="字幕列表" aria-label="字幕列表">≡</button>
-        <button class="icon-btn" id="btnRetranslate" title="重新翻译" aria-label="重新翻译">⇄</button>
-        <button class="icon-btn" id="btnSettings" title="设置" aria-label="设置">⚙</button>
-        <button class="icon-btn new-tab" id="btnNewTab" title="新建标签页（Shift+点击为隐私）" aria-label="新建标签页">+</button>
+  <main class="workspace">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">STANDALONE CAPTION WORKSPACE</p>
+        <h1>译览字幕台</h1>
+        <p class="subhead">提取 YouTube 字幕，离线查看并翻译。无需打开内置浏览器。</p>
       </div>
-      <div class="progress" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
-      <div class="status-bar" id="statusBar">打开 YouTube 视频页自动提取双语字幕</div>
+      <button id="btnSettings" class="button quiet">翻译设置</button>
     </header>
 
-    <main id="webviewHost" class="webview-host"></main>
-  </div>
+    <section class="source-card">
+      <label for="videoUrl">YouTube 视频链接</label>
+      <div class="link-row">
+        <input id="videoUrl" type="url" placeholder="https://www.youtube.com/watch?v=..." spellcheck="false" />
+        <button id="btnFetch" class="button primary">获取字幕</button>
+      </div>
+      <p id="status" class="status" role="status">粘贴视频链接以开始。</p>
+    </section>
+
+    <section class="control-bar">
+      <label>字幕轨 <select id="trackSelect" disabled></select></label>
+      <button id="btnLoadTrack" class="button" disabled>载入此轨</button>
+      <span class="divider"></span>
+      <button id="btnTranslate" class="button primary" disabled>翻译全部</button>
+      <button id="btnExportSrt" class="button" disabled>导出 SRT</button>
+      <button id="btnExportTxt" class="button" disabled>导出 TXT</button>
+      <span id="count" class="count">0 条字幕</span>
+    </section>
+
+    <section id="subtitleList" class="subtitle-list" aria-live="polite">
+      <div class="empty">字幕会显示在这里。翻译将保留原文和对应时间轴。</div>
+    </section>
+  </main>
 
   <!-- Settings modal -->
   <dialog id="settingsDialog" class="modal">
@@ -70,30 +80,6 @@
     </form>
   </dialog>
 
-  <!-- Bookmarks modal -->
-  <dialog id="bookmarksDialog" class="modal">
-    <div class="modal-card">
-      <div class="modal-header">
-        <h2>收藏夹</h2>
-        <button class="icon-btn" id="bookmarksClose" aria-label="关闭">✕</button>
-      </div>
-      <ul id="bookmarksList" class="list"></ul>
-      <p id="bookmarksEmpty" class="empty">暂无收藏。点击地址栏旁的星标即可收藏当前网页。</p>
-    </div>
-  </dialog>
-
-  <!-- Subtitle list modal -->
-  <dialog id="subtitleDialog" class="modal">
-    <div class="modal-card wide">
-      <div class="modal-header">
-        <h2>字幕列表</h2>
-        <button class="icon-btn" id="subtitleClose" aria-label="关闭">✕</button>
-      </div>
-      <div id="subtitleList" class="subtitle-list"></div>
-      <p id="subtitleEmpty" class="empty">当前标签页没有字幕</p>
-    </div>
-  </dialog>
-
-  <script src="app.js" type="module"></script>
+  <script src="workspace.js" type="module"></script>
 </body>
 </html>
