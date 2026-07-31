@@ -166,9 +166,19 @@ enum SubtitleExtractor {
           overlay.style.display = 'none';
         } else {
           var s = window.__tbSubs[idx];
-          origEl.textContent = s.o || '';
-          if (s.t) { transEl.textContent = s.t; transEl.style.display = 'inline-block'; }
-          else { transEl.textContent = ''; transEl.style.display = 'none'; }
+          if (s.t) {
+            // Translation is the app's primary overlay. Do not duplicate the English source line.
+            origEl.textContent = '';
+            origEl.style.display = 'none';
+            transEl.textContent = s.t;
+            transEl.style.display = 'inline-block';
+          } else {
+            // Preserve the original only while a translation is unavailable.
+            origEl.textContent = s.o || '';
+            origEl.style.display = 'block';
+            transEl.textContent = '';
+            transEl.style.display = 'none';
+          }
           overlay.style.display = (s.o || s.t) ? 'block' : 'none';
         }
         post('tbActiveIndex', idx);

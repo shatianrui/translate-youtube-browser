@@ -4,6 +4,7 @@
  * Run: node scripts/test-core.mjs
  */
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { parseCaptionBody } from '../renderer/subtitle.js';
 import { parseNumbered } from '../renderer/translation.js';
 
@@ -34,5 +35,17 @@ assert.deepEqual(numbered, ['你好', '世界 补充一行', '再见']);
 
 const empty = parseCaptionBody('   ');
 assert.deepEqual(empty, []);
+
+// Regression: translated cues must be unambiguously Chinese in the custom player overlay.
+// The original line remains available only as an untranslated fallback, while the visible-CC
+// observer must retain access to the native caption DOM.
+const subtitleExtractor = await readFile(
+  new URL('../../TranslateBrowser/SubtitleExtractor.swift', import.meta.url),
+  'utf8',
+);
+assert.match(subtitleExtractor, /if \(s\.t\) \{[\s\S]*?origEl\.textContent = '';[\s\S]*?origEl\.style\.display = 'none';/);
+assert.match(subtitleExtractor, /else \{[\s\S]*?origEl\.textContent = s\.o \|\| '';[\s\S]*?origEl\.style\.display = 'block';/);
+assert.match(subtitleExtractor, /\.ytp-caption-window-container \.ytp-caption-segment/,
+  'visible CC fallback observer must keep reading native caption DOM');
 
 console.log('✓ desktop core tests passed');
