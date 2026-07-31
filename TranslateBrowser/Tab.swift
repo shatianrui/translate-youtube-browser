@@ -3,6 +3,22 @@ import WebKit
 import Combine
 import SwiftUI
 
+/// Caption text and playback time reported by the injected page observer. The observer only sends
+/// captions that are already visibly rendered in the current YouTube player after the user enables CC.
+struct VisibleCaptionPayload {
+    let text: String
+    let time: Double
+
+    init?(_ body: Any) {
+        guard let values = body as? [String: Any],
+              let rawText = values["text"] as? String else { return nil }
+        let cleaned = SubtitleExtractor.cleanCaptionText(rawText)
+        guard !cleaned.isEmpty else { return nil }
+        text = cleaned
+        time = (values["time"] as? NSNumber)?.doubleValue ?? 0
+    }
+}
+
 /// One browser tab: its own WKWebView plus YouTube subtitle extraction/translation state.
 @MainActor
 final class Tab: ObservableObject, Identifiable {
@@ -32,6 +48,10 @@ final class Tab: ObservableObject, Identifiable {
 
     private var lastLoadedVideoID: String?
     private var extractionTask: Task<Void, Never>?
+    private var visibleCaptionTranslationTask: Task<Void, Never>?
+    private var usesVisibleCaptionFallback = false
+    private var lastVisibleCaptionText = ""
+    private var lastVisibleCaptionTime = -Double.infinity
 
     init(urlText: String, isPrivate: Bool = false) {
         self.urlText = urlText
@@ -76,6 +96,7 @@ final class Tab: ObservableObject, Identifiable {
         guard videoID != lastLoadedVideoID else { return }
         lastLoadedVideoID = videoID
         extractionTask?.cancel()
+        resetVisibleCaptionFallback()
         extractionTask = Task { await extractAndTranslate() }
     }
 
@@ -83,8 +104,45 @@ final class Tab: ObservableObject, Identifiable {
         currentIndex = subtitles.indices.contains(index) ? index : nil
     }
 
+    func onVisibleCaption(_ payload: VisibleCaptionPayload) {
+        guard usesVisibleCaptionFallback else { return }
+        // Mutation observers can report the same on-screen caption repeatedly. Keep repetitions
+        // that occur later in playback, but do not send duplicate provider requests in one cue.
+        guard payload.text != lastVisibleCaptionText || payload.time - lastVisibleCaptionTime > 1.0 else { return }
+        lastVisibleCaptionText = payload.text
+        lastVisibleCaptionTime = payload.time
+
+        let subtitle = Subtitle(start: max(payload.time, 0), duration: 4, text: payload.text)
+        subtitles.append(subtitle)
+        currentIndex = subtitles.indices.last
+        statusMessage = "正在实时翻译…"
+        Task { await pushSubtitlesToPage() }
+
+        visibleCaptionTranslationTask?.cancel()
+        let index = subtitles.indices.last!
+        visibleCaptionTranslationTask = Task { [weak self] in
+            await self?.translateVisibleCaption(at: index)
+        }
+    }
+
+    private func resetVisibleCaptionFallback() {
+        visibleCaptionTranslationTask?.cancel()
+        visibleCaptionTranslationTask = nil
+        usesVisibleCaptionFallback = false
+        lastVisibleCaptionText = ""
+        lastVisibleCaptionTime = -Double.infinity
+    }
+
+    private func beginVisibleCaptionFallback() {
+        guard !Task.isCancelled else { return }
+        resetVisibleCaptionFallback()
+        usesVisibleCaptionFallback = true
+        statusMessage = "请在 YouTube 播放器中开启 CC 以实时翻译"
+    }
+
     private func clearSubtitleState() {
         extractionTask?.cancel()
+        resetVisibleCaptionFallback()
         subtitles = []
         currentIndex = nil
         lastLoadedVideoID = nil
@@ -145,7 +203,7 @@ final class Tab: ObservableObject, Identifiable {
         }
 
         guard !tracks.isEmpty else {
-            statusMessage = "该视频未提供可用字幕"
+            beginVisibleCaptionFallback()
             return
         }
 
@@ -155,7 +213,7 @@ final class Tab: ObservableObject, Identifiable {
         do {
             let subs = try await SubtitleExtractor.fetchSubtitles(from: track, using: webView)
             guard !subs.isEmpty else {
-                statusMessage = "未获取到字幕内容"
+                beginVisibleCaptionFallback()
                 return
             }
             if Task.isCancelled { return }
@@ -165,7 +223,9 @@ final class Tab: ObservableObject, Identifiable {
             await translateAll()
         } catch {
             if Task.isCancelled { return }
-            statusMessage = "字幕获取失败: \(error.localizedDescription)"
+            // A track can be listed yet return an empty/blocked page body. Stay inside the loaded
+            // page and wait for the user's visible CC captions rather than probing other clients.
+            beginVisibleCaptionFallback()
         }
     }
 
@@ -224,6 +284,31 @@ final class Tab: ObservableObject, Identifiable {
     private func evalJS(_ script: String) {
         guard let webView else { return }
         Task { _ = try? await webView.evaluateJavaScript(script) }
+    }
+
+    private func translateVisibleCaption(at index: Int) async {
+        guard usesVisibleCaptionFallback, subtitles.indices.contains(index) else { return }
+        guard !apiKey.isEmpty else {
+            statusMessage = "请在设置中填写 \(provider.rawValue) 的 API Key"
+            tabsManager?.showSettings = true
+            return
+        }
+        let service = TranslationService(
+            provider: provider,
+            apiKey: apiKey,
+            model: model.isEmpty ? provider.defaultModel : model
+        )
+        do {
+            let translated = try await service.translate(texts: [subtitles[index].text], to: targetLang)
+            guard !Task.isCancelled, usesVisibleCaptionFallback,
+                  subtitles.indices.contains(index), let text = translated.first else { return }
+            subtitles[index].translation = text
+            statusMessage = "实时字幕已翻译（\(provider.rawValue)）"
+            await pushSubtitlesToPage()
+        } catch {
+            guard !Task.isCancelled else { return }
+            statusMessage = "实时字幕翻译失败: \(error.localizedDescription)"
+        }
     }
 
     func translateAll() async {

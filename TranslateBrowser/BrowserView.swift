@@ -42,6 +42,9 @@ struct BrowserView: UIViewRepresentable {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "tbUrlChanged")
         contentController.add(context.coordinator, name: "tbActiveIndex")
+        // Visible-caption fallback: only observes caption text that YouTube has already rendered
+        // in this page after the user enables CC. It does not request any other endpoint.
+        contentController.add(context.coordinator, name: "tbVisibleCaption")
         contentController.addUserScript(WKUserScript(
             source: SubtitleExtractor.bilingualOverlayJS,
             injectionTime: .atDocumentStart,
@@ -163,6 +166,9 @@ struct BrowserView: UIViewRepresentable {
             case "tbActiveIndex":
                 guard let index = message.body as? Int else { return }
                 Task { @MainActor in tab.onActiveIndexChanged(index) }
+            case "tbVisibleCaption":
+                guard let payload = VisibleCaptionPayload(message.body) else { return }
+                Task { @MainActor in tab.onVisibleCaption(payload) }
             default:
                 break
             }

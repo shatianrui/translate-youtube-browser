@@ -90,7 +90,6 @@ enum SubtitleExtractor {
 
       var style = document.createElement('style');
       style.textContent = [
-        '.ytp-caption-window-container{display:none !important;}',
         '#tb-bilingual-caption{position:absolute;left:50%;bottom:9%;transform:translateX(-50%);',
         'max-width:min(92%,720px);z-index:2147483647;pointer-events:none;text-align:center;',
         'font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;}',
@@ -193,6 +192,40 @@ enum SubtitleExtractor {
         var overlay = document.getElementById('tb-bilingual-caption');
         if (overlay) overlay.style.display = 'none';
       };
+
+      // Fallback for pages where the caption track URL is empty: observe only text that the
+      // currently loaded YouTube page has rendered after the user turns CC on. This deliberately
+      // does not fetch, infer, or probe captions from any other endpoint.
+      var lastVisibleText = '';
+      var lastVisibleTime = -Infinity;
+      function readVisibleCaption() {
+        var selectors = [
+          '.ytp-caption-window-container .ytp-caption-segment', // desktop player
+          '.caption-window .captions-text', '.caption-window .caption-text', // mobile variants
+          '#caption-window .ytp-caption-segment', '#caption-window .captions-text'
+        ];
+        var nodes = document.querySelectorAll(selectors.join(','));
+        var parts = [];
+        for (var i = 0; i < nodes.length; i++) {
+          var node = nodes[i];
+          if (!node || !node.getClientRects || !node.getClientRects().length) continue;
+          var text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (text && parts.indexOf(text) < 0) parts.push(text);
+        }
+        var text = parts.join(' ').trim();
+        var video = findVideo(findPlayerContainer());
+        var time = video && isFinite(video.currentTime) ? video.currentTime : 0;
+        if (!text || (text === lastVisibleText && time - lastVisibleTime < 0.45)) return;
+        lastVisibleText = text;
+        lastVisibleTime = time;
+        post('tbVisibleCaption', { text: text, time: time });
+      }
+      var captionObserver = new MutationObserver(function() { setTimeout(readVisibleCaption, 0); });
+      captionObserver.observe(document.documentElement, {
+        childList: true, subtree: true, characterData: true, attributes: true,
+        attributeFilter: ['class', 'style', 'aria-hidden']
+      });
+      setInterval(readVisibleCaption, 250);
 
       try {
         var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;

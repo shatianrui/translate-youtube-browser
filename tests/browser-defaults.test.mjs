@@ -19,10 +19,35 @@ assert.match(
 );
 assert.match(
   tab,
-  /statusMessage = "未获取到字幕内容"/,
-  'empty captions must have a concise neutral status'
+  /statusMessage = "请在 YouTube 播放器中开启 CC 以实时翻译"/,
+  'empty captions must explain the live CC fallback'
 );
 assert.doesNotMatch(tab, /可能被 YouTube 限制/, 'do not present an unsupported blocked-caption claim');
+assert.match(
+  browserView,
+  /contentController\.add\(context\.coordinator, name: "tbVisibleCaption"\)/,
+  'the web view must receive visible YouTube caption messages'
+);
+assert.match(
+  browserView,
+  /case "tbVisibleCaption"[\s\S]*tab\.onVisibleCaption/,
+  'visible caption messages must be routed to the active tab'
+);
+assert.match(
+  tab,
+  /请在 YouTube 播放器中开启 CC 以实时翻译/,
+  'empty page-track downloads must transparently ask the user to enable CC for live fallback'
+);
+assert.match(
+  tab,
+  /func onVisibleCaption\(_ payload: VisibleCaptionPayload\)/,
+  'the tab must accept visible-caption fallback payloads'
+);
+assert.match(
+  tab,
+  /translateVisibleCaption\(/,
+  'new visible caption chunks must use the configured translation provider'
+);
 assert.match(browserView, /iPhone; CPU iPhone OS/, 'YouTube must use an iPhone user agent');
 assert.match(browserView, /userAgent\(for: navigationAction\.request\.url\)/, 'the user agent must be selected per navigation URL');
 assert.match(browserView, /isYouTubeURL/, 'only YouTube navigation should receive the custom user agent');
