@@ -38,6 +38,14 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("官方 YouTube Studio 导入") {
+                    Text("即将推出。该导入路径将仅使用官方 YouTube Studio / YouTube Data API。使用前必须登录 Google/YouTube 帐号，且该帐号必须拥有目标视频的编辑权限。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("使用 YouTube Studio 导入（暂不可用）") {}
+                        .disabled(true)
+                }
+
                 Section {
                     Text("打开 YouTube 视频后会自动提取字幕，并在画面内叠加原文 + 译文双语字幕。API Key 仅保存在本机。若提示字幕为空，可点右上角刷新按钮重试。")
                         .font(.footnote)

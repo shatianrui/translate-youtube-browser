@@ -220,47 +220,14 @@ enum SubtitleExtractor {
         let body: String
     }
 
-    /// Multi-strategy caption download.
-    /// YouTube's WEB caption `baseUrl` often includes `exp=xpe`, which requires a BotGuard
-    /// PoToken — without it timedtext returns HTTP 200 with an empty body. Strategies:
-    ///  1. Try the page track URL via in-page `fetch` (cookies) and URLSession.
-    ///  2. If empty / PoToken-gated, resolve fresh tracks via InnerTube `ANDROID_VR`
-    ///     (no PoToken on subs) and download those.
+    /// Download a caption track exposed by the currently loaded YouTube page. This app does not
+    /// attempt alternative client identities or access-control workarounds when a track is absent
+    /// or unavailable.
     static func fetchSubtitles(
         from track: CaptionTrack,
-        videoID: String?,
         using webView: WKWebView?
     ) async throws -> [Subtitle] {
-        let pageSubs = try await downloadTrack(track, using: webView)
-        if !pageSubs.isEmpty { return pageSubs }
-
-        if let videoID {
-            let vrTracks = try await fetchTracksViaAndroidVR(videoID: videoID)
-            let preferred = pickTrack(from: vrTracks, preferring: track.languageCode) ?? vrTracks.first
-            if let preferred {
-                let vrSubs = try await downloadTrack(preferred, using: nil)
-                if !vrSubs.isEmpty { return vrSubs }
-            }
-            // Last resort: try every VR track
-            for t in vrTracks {
-                let subs = try await downloadTrack(t, using: nil)
-                if !subs.isEmpty { return subs }
-            }
-        }
-        return []
-    }
-
-    private static func pickTrack(from tracks: [CaptionTrack], preferring languageCode: String) -> CaptionTrack? {
-        if let exact = tracks.first(where: { $0.languageCode == languageCode && $0.kind != "asr" }) {
-            return exact
-        }
-        if let lang = tracks.first(where: { $0.languageCode.hasPrefix(String(languageCode.prefix(2))) && $0.kind != "asr" }) {
-            return lang
-        }
-        if let en = tracks.first(where: { $0.languageCode.hasPrefix("en") && $0.kind != "asr" }) {
-            return en
-        }
-        return tracks.first(where: { $0.kind != "asr" }) ?? tracks.first
+        return try await downloadTrack(track, using: webView)
     }
 
     private static func downloadTrack(_ track: CaptionTrack, using webView: WKWebView?) async throws -> [Subtitle] {
@@ -291,50 +258,6 @@ enum SubtitleExtractor {
         return []
     }
 
-    /// InnerTube ANDROID_VR player — currently returns caption URLs that do not require PoToken.
-    static func fetchTracksViaAndroidVR(videoID: String) async throws -> [CaptionTrack] {
-        let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")!
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12) gzip",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("28", forHTTPHeaderField: "X-Youtube-Client-Name")
-        request.setValue("1.60.19", forHTTPHeaderField: "X-Youtube-Client-Version")
-
-        let body: [String: Any] = [
-            "context": [
-                "client": [
-                    "clientName": "ANDROID_VR",
-                    "clientVersion": "1.60.19",
-                    "hl": "en",
-                    "gl": "US",
-                    "androidSdkVersion": 34,
-                    "osName": "Android",
-                    "osVersion": "12",
-                ]
-            ],
-            "videoId": videoID,
-            "contentCheckOk": true,
-            "racyCheckOk": true,
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let captions = root["captions"] as? [String: Any],
-              let renderer = captions["playerCaptionsTracklistRenderer"] as? [String: Any],
-              let trackObjs = renderer["captionTracks"] as? [[String: Any]] else {
-            return []
-        }
-        let trackData = try JSONSerialization.data(withJSONObject: trackObjs)
-        return (try? JSONDecoder().decode([CaptionTrack].self, from: trackData)) ?? []
-    }
 
     private static func captionURLCandidates(from base: String) -> [String] {
         var urls: [String] = []

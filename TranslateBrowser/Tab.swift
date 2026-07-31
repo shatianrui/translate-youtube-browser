@@ -123,7 +123,6 @@ final class Tab: ObservableObject, Identifiable {
 
     private func extractAndTranslate() async {
         guard let webView else { return }
-        let videoID = lastLoadedVideoID
         statusMessage = "正在获取字幕…"
         subtitles = []
         currentIndex = nil
@@ -145,14 +144,8 @@ final class Tab: ObservableObject, Identifiable {
             }
         }
 
-        // Page tracks missing (or still loading): resolve via InnerTube ANDROID_VR.
-        if tracks.isEmpty, let videoID {
-            statusMessage = "正在通过备用通道获取字幕轨…"
-            tracks = (try? await SubtitleExtractor.fetchTracksViaAndroidVR(videoID: videoID)) ?? []
-        }
-
         guard !tracks.isEmpty else {
-            statusMessage = "该视频没有可用字幕"
+            statusMessage = "该视频未提供可用字幕"
             return
         }
 
@@ -160,7 +153,7 @@ final class Tab: ObservableObject, Identifiable {
         statusMessage = "正在下载字幕（\(track.languageCode)）…"
 
         do {
-            let subs = try await SubtitleExtractor.fetchSubtitles(from: track, videoID: videoID, using: webView)
+            let subs = try await SubtitleExtractor.fetchSubtitles(from: track, using: webView)
             guard !subs.isEmpty else {
                 statusMessage = "字幕内容为空（可能被 YouTube 限制，请稍后重试）"
                 return
