@@ -1,17 +1,25 @@
 name: TranslateBrowser
 options:
-  bundleIdPrefix: com.example
+  bundleIdPrefix: com.shatianrui
+packages:
+  GoogleSignIn:
+    url: https://github.com/google/GoogleSignIn-iOS
+    from: 9.0.0
 targets:
   TranslateBrowser:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
     sources: [TranslateBrowser]
+    dependencies:
+      - package: GoogleSignIn
     settings:
       GENERATE_INFOPLIST_FILE: YES
-      PRODUCT_BUNDLE_IDENTIFIER: com.example.TranslateBrowser
+      PRODUCT_BUNDLE_IDENTIFIER: com.shatianrui.translatebrowser
       INFOPLIST_KEY_UILaunchScreen_Generation: YES
       INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
       INFOPLIST_KEY_CFBundleDisplayName: "译览"
+      INFOPLIST_KEY_GIDClientID: 657419713740-2ut37563sc17om5qorpm0tsm2ivn0od9.apps.googleusercontent.com
+      INFOPLIST_KEY_CFBundleURLTypes: [{CFBundleURLSchemes: [com.googleusercontent.apps.657419713740-2ut37563sc17om5qorpm0tsm2ivn0od9]}]
