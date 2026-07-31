@@ -30,10 +30,9 @@ struct BrowserView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        // Let YouTube's fullscreen button use the standards Fullscreen API on the player's own
-        // DOM container (which our injected script redirects it to) instead of falling back to
-        // a separate native full-screen video controller that would cover our caption overlay.
-        config.preferences.isElementFullscreenEnabled = true
+        // Keep playback inside this embedded page. Element fullscreen can hand the player to a
+        // separate native controller, which would hide the browser chrome and caption overlay.
+        config.preferences.isElementFullscreenEnabled = false
         // Private tabs get an ephemeral, non-persistent data store: no cookies, cache, or
         // history survive once the tab is closed, matching Safari's private browsing.
         if tab.isPrivate {
@@ -137,6 +136,19 @@ struct BrowserView: UIViewRepresentable {
         ) {
             webView.customUserAgent = BrowserView.userAgent(for: navigationAction.request.url)
             decisionHandler(.allow)
+        }
+
+        // Sites such as YouTube can use target=_blank or window.open for playback links. Do not
+        // create a second web view; navigate the current embedded page instead.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            guard navigationAction.targetFrame == nil else { return nil }
+            webView.load(navigationAction.request)
+            return nil
         }
 
         @objc func handleRefresh() {

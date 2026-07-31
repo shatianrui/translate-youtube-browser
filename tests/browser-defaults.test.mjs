@@ -26,6 +26,11 @@ assert.doesNotMatch(tab, /可能被 YouTube 限制/, 'do not present an unsuppor
 assert.match(browserView, /iPhone; CPU iPhone OS/, 'YouTube must use an iPhone user agent');
 assert.match(browserView, /userAgent\(for: navigationAction\.request\.url\)/, 'the user agent must be selected per navigation URL');
 assert.match(browserView, /isYouTubeURL/, 'only YouTube navigation should receive the custom user agent');
+assert.match(
+  browserView,
+  /config\.preferences\.isElementFullscreenEnabled\s*=\s*false/,
+  'element fullscreen must stay disabled so video playback remains in the embedded page'
+);
 assert.doesNotMatch(
   contentView,
   /Label\("字幕", systemImage: "captions\.bubble"\)/,
