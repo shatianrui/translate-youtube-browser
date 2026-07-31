@@ -17,7 +17,9 @@ struct ContentView: View {
             Divider()
             bottomToolbar
         }
-        .sheet(isPresented: $tabsManager.showSettings) {
+        .sheet(isPresented: $tabsManager.showSettings, onDismiss: {
+            Task { await activeTab?.retryTranslationIfNeeded() }
+        }) {
             SettingsView()
         }
         .sheet(isPresented: Binding(

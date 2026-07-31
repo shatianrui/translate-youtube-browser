@@ -271,6 +271,14 @@ final class Tab: ObservableObject, Identifiable {
         await pushSubtitlesToPage()
     }
 
+    /// Called after Settings closes: if translation was skipped earlier for lack of an API key
+    /// (subtitles are showing English-only), resume it now that a key may have been entered.
+    func retryTranslationIfNeeded() async {
+        guard !apiKey.isEmpty, !subtitles.isEmpty, !isTranslating else { return }
+        guard subtitles.contains(where: { ($0.translation ?? "").isEmpty }) else { return }
+        await translateAll()
+    }
+
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
     func reload() {
