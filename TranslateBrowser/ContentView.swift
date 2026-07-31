@@ -110,19 +110,6 @@ struct ContentView: View {
                 controlBar(for: activeTab)
                     .padding(.trailing, 12)
                     .padding(.top, 10)
-            } else if let activeTab {
-                Button {
-                    activeTab.showSubtitlePanel = true
-                } label: {
-                    Label("字幕", systemImage: "captions.bubble")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.black.opacity(0.45), in: Capsule())
-                        .foregroundStyle(.white)
-                }
-                .padding(.trailing, 12)
-                .padding(.top, 10)
             }
         }
     }
@@ -173,8 +160,8 @@ struct ContentView: View {
         .background(.black.opacity(0.45), in: Capsule())
     }
 
-    /// Classic Safari bottom toolbar: back, forward, share, bookmark, tabs — five icons, evenly
-    /// spaced, tinted dark when the active tab is a private tab.
+    /// Classic Safari-style bottom toolbar: navigation, sharing, bookmarking, caption controls,
+    /// and tabs — evenly spaced and tinted dark when the active tab is private.
     private var bottomToolbar: some View {
         let isPrivate = activeTab?.isPrivate ?? false
         return HStack {
@@ -206,6 +193,14 @@ struct ContentView: View {
                 Image(systemName: isBookmarked ? "star.fill" : "star")
             }
             .disabled(activeTab == nil)
+            Spacer()
+            Button {
+                activeTab?.showSubtitlePanel.toggle()
+            } label: {
+                Image(systemName: activeTab?.showSubtitlePanel == true ? "captions.bubble.fill" : "captions.bubble")
+            }
+            .disabled(activeTab == nil)
+            .accessibilityLabel("字幕控制")
             Spacer()
             Button {
                 bookmarksSheetItem = BookmarksSheetToken()

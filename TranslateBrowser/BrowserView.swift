@@ -6,6 +6,22 @@ struct BrowserView: UIViewRepresentable {
     @ObservedObject var tab: Tab
     var onOpenLinkInNewTab: (URL) -> Void = { _ in }
 
+    /// Preserve iOS WKWebView's normal user agent outside YouTube, but request YouTube's
+    /// mobile site when navigating there. This avoids forcing desktop Safari or changing
+    /// how unrelated pages identify the in-app browser.
+    private static let youTubeMobileUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+
+    static func userAgent(for url: URL?) -> String? {
+        guard let host = url?.host?.lowercased() else { return nil }
+        return isYouTubeURL(host: host) ? youTubeMobileUserAgent : nil
+    }
+
+    private static func isYouTubeURL(host: String) -> Bool {
+        host == "youtube.com" || host.hasSuffix(".youtube.com") ||
+            host == "youtu.be" || host.hasSuffix(".youtu.be") ||
+            host == "youtube-nocookie.com" || host.hasSuffix(".youtube-nocookie.com")
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(tab: tab, onOpenLinkInNewTab: onOpenLinkInNewTab)
     }
@@ -35,7 +51,7 @@ struct BrowserView: UIViewRepresentable {
         config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        webView.customUserAgent = BrowserView.userAgent(for: URL(string: tab.urlText))
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
@@ -112,6 +128,15 @@ struct BrowserView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             Task { @MainActor in refreshControl?.endRefreshing() }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            webView.customUserAgent = BrowserView.userAgent(for: navigationAction.request.url)
+            decisionHandler(.allow)
         }
 
         @objc func handleRefresh() {

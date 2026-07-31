@@ -19,7 +19,7 @@ final class Tab: ObservableObject, Identifiable {
     @Published var currentIndex: Int?
     @Published var statusMessage = ""
     @Published var isTranslating = false
-    @Published var showSubtitlePanel = true
+    @Published var showSubtitlePanel = false
     @Published var showSubtitleList = false
 
     @AppStorage("provider") private var providerRaw = LLMProvider.openai.rawValue
@@ -155,7 +155,7 @@ final class Tab: ObservableObject, Identifiable {
         do {
             let subs = try await SubtitleExtractor.fetchSubtitles(from: track, using: webView)
             guard !subs.isEmpty else {
-                statusMessage = "字幕内容为空（可能被 YouTube 限制，请稍后重试）"
+                statusMessage = "未获取到字幕内容"
                 return
             }
             if Task.isCancelled { return }

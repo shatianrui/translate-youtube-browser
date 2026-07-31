@@ -12,7 +12,7 @@ final class TabsManager: ObservableObject {
     @Published var showSettings = false
     @Published var showTabsOverview = false
 
-    private static let defaultURL = "https://www.youtube.com"
+    private static let defaultURL = "https://m.youtube.com/"
 
     // ContentView only holds this manager as its @StateObject, not the individual Tab objects,
     // so a Tab's own @Published changes (progress, subtitles, canGoBack, ...) wouldn't otherwise
