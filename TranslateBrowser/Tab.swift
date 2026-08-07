@@ -2,10 +2,13 @@ import Foundation
 import WebKit
 import Combine
 import SwiftUI
+import os
 
 /// One browser tab: its own WKWebView plus YouTube subtitle extraction/translation state.
 @MainActor
 final class Tab: ObservableObject, Identifiable {
+    private static let logger = Logger(subsystem: "com.translatebrowser.app", category: "Translation")
+
     let id = UUID()
     let isPrivate: Bool
 
@@ -220,8 +223,12 @@ final class Tab: ObservableObject, Identifiable {
 
     private func pushSubtitlesToPage() async {
         guard let webView else { return }
+        // While a translation pass is running, show a "翻译中…" placeholder for cues that
+        // haven't completed yet instead of leaving the translation line blank (which made the
+        // overlay look like it was stuck showing only the English original).
+        let placeholder = isTranslating ? "翻译中…" : ""
         let payload = subtitles.map {
-            PageSubtitle(s: $0.start, d: $0.duration, o: $0.text, t: $0.translation ?? "")
+            PageSubtitle(s: $0.start, d: $0.duration, o: $0.text, t: $0.translation ?? placeholder)
         }
         guard let data = try? JSONEncoder().encode(payload),
               let json = String(data: data, encoding: .utf8) else { return }
@@ -245,29 +252,99 @@ final class Tab: ObservableObject, Identifiable {
             apiKey: apiKey,
             model: model.isEmpty ? provider.defaultModel : model
         )
+        let targetLang = self.targetLang
         isTranslating = true
         defer { isTranslating = false }
         let chunkSize = 20
-        for start in stride(from: 0, to: subtitles.count, by: chunkSize) {
-            if Task.isCancelled { return }
-            let end = min(start + chunkSize, subtitles.count)
-            let texts = subtitles[start..<end].map(\.text)
-            do {
-                let translated = try await service.translate(texts: texts, to: targetLang)
-                for i in start..<end {
-                    let idx = i - start
-                    if translated.indices.contains(idx) {
-                        subtitles[i].translation = translated[idx]
+        // Run a few chunks concurrently so translation streams in faster/smoother,
+        // instead of waiting for each chunk's network round-trip one at a time.
+        let maxConcurrent = 3
+        let ranges = stride(from: 0, to: subtitles.count, by: chunkSize).map { start in
+            (start, min(start + chunkSize, subtitles.count))
+        }
+        // Precompute the text for each chunk up front so the task-scheduling closure below
+        // never needs to read the main-actor-isolated `subtitles` property itself.
+        let textChunks: [[String]] = ranges.map { subtitles[$0.0..<$0.1].map(\.text) }
+        var completedCount = 0
+        var lastErrorMessage: String?
+
+        // Runs one concurrency-limited pass over the given range indices, applying successful
+        // translations directly to `subtitles` and returning the indices that still failed so
+        // the caller can retry them.
+        func runPass(_ rangeIndices: [Int]) async -> [Int] {
+            var stillFailed: [Int] = []
+            await withTaskGroup(of: (Int, Result<[String], Error>).self) { group in
+                var iterator = rangeIndices.makeIterator()
+
+                func startNext() {
+                    guard let rangeIndex = iterator.next() else { return }
+                    let texts = textChunks[rangeIndex]
+                    group.addTask {
+                        do {
+                            let translated = try await service.translate(texts: texts, to: targetLang)
+                            return (rangeIndex, .success(translated))
+                        } catch {
+                            return (rangeIndex, .failure(error))
+                        }
                     }
                 }
-                statusMessage = "已翻译 \(end)/\(subtitles.count)"
-                await pushSubtitlesToPage()
-            } catch {
-                statusMessage = "翻译失败: \(error.localizedDescription)"
-                return
+
+                for _ in 0..<maxConcurrent { startNext() }
+
+                while let (rangeIndex, result) = await group.next() {
+                    if Task.isCancelled { break }
+                    let (start, end) = ranges[rangeIndex]
+                    switch result {
+                    case .success(let translated):
+                        for i in start..<end {
+                            let idx = i - start
+                            if translated.indices.contains(idx) {
+                                subtitles[i].translation = translated[idx]
+                            }
+                        }
+                        completedCount += (end - start)
+                        statusMessage = "已翻译 \(completedCount)/\(subtitles.count)"
+                        await pushSubtitlesToPage()
+                    case .failure(let error):
+                        // Log full error detail (HTTP status/body for bad responses, or the
+                        // underlying network error) so translation failures are diagnosable
+                        // instead of silently leaving the English original on screen.
+                        Self.logger.error("翻译分片 [\(start)-\(end)) 失败: \(String(describing: error), privacy: .public)")
+                        lastErrorMessage = error.localizedDescription
+                        stillFailed.append(rangeIndex)
+                    }
+                    startNext()
+                }
             }
+            return stillFailed
         }
-        statusMessage = "翻译完成（\(provider.rawValue)）"
+
+        var failedRangeIndices = await runPass(Array(ranges.indices))
+
+        // Automatically retry failed chunks once — most failures are transient (timeouts,
+        // rate limiting) and a single retry clears them without user intervention.
+        if !failedRangeIndices.isEmpty, !Task.isCancelled {
+            statusMessage = "部分字幕翻译失败，正在重试…"
+            failedRangeIndices = await runPass(failedRangeIndices)
+        }
+
+        guard !Task.isCancelled else { return }
+        if !failedRangeIndices.isEmpty {
+            // Mark still-failing cues explicitly instead of leaving `translation` nil, which
+            // made the overlay fall back to showing only the (English) original with no
+            // indication that translation had failed.
+            var failedCount = 0
+            for rangeIndex in failedRangeIndices {
+                let (start, end) = ranges[rangeIndex]
+                failedCount += (end - start)
+                for i in start..<end where subtitles[i].translation == nil {
+                    subtitles[i].translation = "⚠️ 翻译失败"
+                }
+            }
+            statusMessage = "翻译完成，\(failedCount) 条失败: \(lastErrorMessage ?? "")"
+        } else {
+            statusMessage = "翻译完成（\(provider.rawValue)）"
+        }
         await pushSubtitlesToPage()
     }
 
