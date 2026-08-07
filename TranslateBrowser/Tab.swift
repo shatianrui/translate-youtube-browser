@@ -245,29 +245,69 @@ final class Tab: ObservableObject, Identifiable {
             apiKey: apiKey,
             model: model.isEmpty ? provider.defaultModel : model
         )
+        let targetLang = self.targetLang
         isTranslating = true
         defer { isTranslating = false }
         let chunkSize = 20
-        for start in stride(from: 0, to: subtitles.count, by: chunkSize) {
-            if Task.isCancelled { return }
-            let end = min(start + chunkSize, subtitles.count)
-            let texts = subtitles[start..<end].map(\.text)
-            do {
-                let translated = try await service.translate(texts: texts, to: targetLang)
-                for i in start..<end {
-                    let idx = i - start
-                    if translated.indices.contains(idx) {
-                        subtitles[i].translation = translated[idx]
+        // Run a few chunks concurrently so translation streams in faster/smoother,
+        // instead of waiting for each chunk's network round-trip one at a time.
+        let maxConcurrent = 3
+        let ranges = stride(from: 0, to: subtitles.count, by: chunkSize).map { start in
+            (start, min(start + chunkSize, subtitles.count))
+        }
+        var completedCount = 0
+        var failureCount = 0
+        var lastErrorMessage: String?
+
+        await withTaskGroup(of: (Int, Int, Result<[String], Error>).self) { group in
+            // Use a plain index into `ranges` (rather than a captured iterator) so there is
+            // no shared mutable state that could be raced by concurrently completing tasks.
+            var nextIndex = 0
+
+            func startNext() {
+                guard nextIndex < ranges.count else { return }
+                let (start, end) = ranges[nextIndex]
+                nextIndex += 1
+                let texts = subtitles[start..<end].map(\.text)
+                group.addTask {
+                    do {
+                        let translated = try await service.translate(texts: texts, to: targetLang)
+                        return (start, end, .success(translated))
+                    } catch {
+                        return (start, end, .failure(error))
                     }
                 }
-                statusMessage = "已翻译 \(end)/\(subtitles.count)"
-                await pushSubtitlesToPage()
-            } catch {
-                statusMessage = "翻译失败: \(error.localizedDescription)"
-                return
+            }
+
+            for _ in 0..<maxConcurrent { startNext() }
+
+            while let (start, end, result) = await group.next() {
+                if Task.isCancelled { break }
+                switch result {
+                case .success(let translated):
+                    for i in start..<end {
+                        let idx = i - start
+                        if translated.indices.contains(idx) {
+                            subtitles[i].translation = translated[idx]
+                        }
+                    }
+                    completedCount += (end - start)
+                    statusMessage = "已翻译 \(completedCount)/\(subtitles.count)"
+                    await pushSubtitlesToPage()
+                case .failure(let error):
+                    failureCount += (end - start)
+                    lastErrorMessage = error.localizedDescription
+                }
+                startNext()
             }
         }
-        statusMessage = "翻译完成（\(provider.rawValue)）"
+
+        guard !Task.isCancelled else { return }
+        if failureCount > 0 {
+            statusMessage = "翻译完成，\(failureCount) 条失败: \(lastErrorMessage ?? "")"
+        } else {
+            statusMessage = "翻译完成（\(provider.rawValue)）"
+        }
         await pushSubtitlesToPage()
     }
 
