@@ -255,20 +255,24 @@ final class Tab: ObservableObject, Identifiable {
         let ranges = stride(from: 0, to: subtitles.count, by: chunkSize).map { start in
             (start, min(start + chunkSize, subtitles.count))
         }
+        // Precompute the text for each chunk up front so the task-scheduling closure below
+        // never needs to read the main-actor-isolated `subtitles` property itself.
+        let textChunks: [[String]] = ranges.map { subtitles[$0.0..<$0.1].map(\.text) }
         var completedCount = 0
         var failureCount = 0
         var lastErrorMessage: String?
 
         await withTaskGroup(of: (Int, Int, Result<[String], Error>).self) { group in
-            // Use a plain index into `ranges` (rather than a captured iterator) so there is
-            // no shared mutable state that could be raced by concurrently completing tasks.
+            // Use a plain index into `ranges`/`textChunks` (rather than a captured iterator)
+            // so there is no shared mutable state that could be raced by concurrently
+            // completing tasks.
             var nextIndex = 0
 
             func startNext() {
                 guard nextIndex < ranges.count else { return }
                 let (start, end) = ranges[nextIndex]
+                let texts = textChunks[nextIndex]
                 nextIndex += 1
-                let texts = subtitles[start..<end].map(\.text)
                 group.addTask {
                     do {
                         let translated = try await service.translate(texts: texts, to: targetLang)
