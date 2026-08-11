@@ -131,6 +131,25 @@ struct BrowserView: UIViewRepresentable {
             }
         }
 
+        // YouTube (and many embedded players) open certain videos/links via `window.open()`
+        // instead of a normal navigation, e.g. the "在 YouTube 上观看" fallback for embeds,
+        // age/region gated content, or a share/sign-in popup. WKWebView never creates a second
+        // window unless this delegate method is implemented: without it, `window.open()` is a
+        // silent no-op and the player window simply never appears. Since we don't render a
+        // second live WKWebView for the popup, open its target URL in a new browser tab instead
+        // (mirrors Safari's popup-to-tab behavior) and tell WebKit not to create the window.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if let url = navigationAction.request.url {
+                Task { @MainActor in onOpenLinkInNewTab(url) }
+            }
+            return nil
+        }
+
         // Safari-style long-press link menu: open in a new tab, or copy the link.
         func webView(
             _ webView: WKWebView,

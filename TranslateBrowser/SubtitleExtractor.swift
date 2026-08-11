@@ -231,6 +231,30 @@ enum SubtitleExtractor {
         videoID: String?,
         using webView: WKWebView?
     ) async throws -> [Subtitle] {
+        // YouTube's block/challenge (PoToken, transient rate limiting) is often short-lived, so
+        // retry the whole strategy chain a couple of times with a brief delay before giving up,
+        // instead of surfacing "被 YouTube 限制" on the very first empty response.
+        var lastError: Error?
+        for attempt in 0..<3 {
+            do {
+                let subs = try await fetchSubtitlesOnce(from: track, videoID: videoID, using: webView)
+                if !subs.isEmpty { return subs }
+            } catch {
+                lastError = error
+            }
+            if attempt < 2 {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+            }
+        }
+        if let lastError { throw lastError }
+        return []
+    }
+
+    private static func fetchSubtitlesOnce(
+        from track: CaptionTrack,
+        videoID: String?,
+        using webView: WKWebView?
+    ) async throws -> [Subtitle] {
         let pageSubs = try await downloadTrack(track, using: webView)
         if !pageSubs.isEmpty { return pageSubs }
 
