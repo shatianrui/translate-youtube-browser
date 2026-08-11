@@ -1,31 +1,13 @@
-# macOS
-.DS_Store
-
-# Xcode
-*.xcodeproj/
-*.xcworkspace/
+# 构建产物
 build/
-DerivedData/
-*.xcuserstate
-xcuserdata/
-
-# Swift Package Manager
-.swiftpm/
-.build/
-
-# IPA and archives (generated)
 *.ipa
 *.xcarchive
 
-# User settings
-*.swp
-*~
+# xcodegen 生成的工程(由 project.yml 生成,不入库)
+*.xcodeproj
 
-# Electron / Node (Windows desktop)
-desktop/node_modules/
-desktop/dist/
-desktop/out/
-*.exe
-*.blockmap
-npm-debug.log*
-yarn-error.log*
+# Xcode / macOS
+DerivedData/
+.DS_Store
+xcuserdata/
+*.xcuserstate

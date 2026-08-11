@@ -7,14 +7,16 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    # 默认版本;CI / scripts/build-ipa.sh 归档时会用实际值覆盖
+    # 默认版本;scripts/build-ipa.sh 归档时会用实际值覆盖
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
   TranslateBrowser:
     type: application
     platform: iOS
-    sources: [TranslateBrowser]
+    sources:
+      - TranslateBrowser/Sources
+      - TranslateBrowser/Resources
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
