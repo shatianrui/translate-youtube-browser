@@ -243,7 +243,7 @@ enum SubtitleExtractor {
                 lastError = error
             }
             if attempt < 2 {
-                try? await Task.sleep(nanoseconds: 700_000_000)
+                try await Task.sleep(nanoseconds: 700_000_000)
             }
         }
         if let lastError { throw lastError }
