@@ -221,7 +221,7 @@ function pickTrack(tracks, preferring) {
   return tracks.find((t) => t.kind !== 'asr') || tracks[0] || null;
 }
 
-export async function fetchSubtitles(track, videoID, webview) {
+async function fetchSubtitlesOnce(track, videoID, webview) {
   const pageSubs = await downloadTrack(track, webview);
   if (pageSubs.length) return pageSubs;
 
@@ -237,5 +237,25 @@ export async function fetchSubtitles(track, videoID, webview) {
       if (subs.length) return subs;
     }
   }
+  return [];
+}
+
+// YouTube's block/challenge (PoToken, transient rate limiting) is often short-lived, so retry
+// the whole strategy chain a couple of times with a brief delay before giving up, instead of
+// surfacing "被 YouTube 限制" on the very first empty response.
+export async function fetchSubtitles(track, videoID, webview) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const subs = await fetchSubtitlesOnce(track, videoID, webview);
+      if (subs.length) return subs;
+    } catch (err) {
+      lastError = err;
+    }
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
+  if (lastError) throw lastError;
   return [];
 }

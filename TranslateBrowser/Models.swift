@@ -10,9 +10,9 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable {
 
     var defaultModel: String {
         switch self {
-        case .openai: return "gpt-4o-mini"
-        case .claude: return "claude-3-5-haiku-latest"
-        case .openrouter: return "openai/gpt-4o-mini"
+        case .openai: return "gpt-5-mini"
+        case .claude: return "claude-haiku-4-5-20251001"
+        case .openrouter: return "openai/gpt-5-mini"
         case .grok: return "grok-3-mini"
         }
     }

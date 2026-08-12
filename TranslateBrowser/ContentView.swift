@@ -268,6 +268,10 @@ struct SubtitleListView: View {
                         if let translation = sub.translation {
                             Text(translation)
                                 .font(.subheadline)
+                        } else if tab.isTranslating {
+                            Text("翻译中…")
+                                .font(.subheadline)
+                                .foregroundStyle(.tertiary)
                         }
                     }
                     .id(i)
