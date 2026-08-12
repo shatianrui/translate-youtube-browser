@@ -224,8 +224,8 @@ enum SubtitleExtractor {
     /// YouTube's WEB caption `baseUrl` often includes `exp=xpe`, which requires a BotGuard
     /// PoToken — without it timedtext returns HTTP 200 with an empty body. Strategies:
     ///  1. Try the page track URL via in-page `fetch` (cookies) and URLSession.
-    ///  2. If empty / PoToken-gated, resolve fresh tracks via InnerTube `ANDROID_VR`
-    ///     (no PoToken on subs) and download those.
+    ///  2. If empty / PoToken-gated, resolve fresh tracks via multiple InnerTube clients
+    ///     (ANDROID_VR, ANDROID_TESTSUITE, iOS — none require PoToken on subs) and download those.
     static func fetchSubtitles(
         from track: CaptionTrack,
         videoID: String?,
@@ -235,14 +235,14 @@ enum SubtitleExtractor {
         if !pageSubs.isEmpty { return pageSubs }
 
         if let videoID {
-            let vrTracks = try await fetchTracksViaAndroidVR(videoID: videoID)
-            let preferred = pickTrack(from: vrTracks, preferring: track.languageCode) ?? vrTracks.first
+            let altTracks = (try? await fetchTracksWithFallbacks(videoID: videoID)) ?? []
+            let preferred = pickTrack(from: altTracks, preferring: track.languageCode) ?? altTracks.first
             if let preferred {
-                let vrSubs = try await downloadTrack(preferred, using: nil)
-                if !vrSubs.isEmpty { return vrSubs }
+                let altSubs = try await downloadTrack(preferred, using: nil)
+                if !altSubs.isEmpty { return altSubs }
             }
-            // Last resort: try every VR track
-            for t in vrTracks {
+            // Last resort: try every alt track
+            for t in altTracks {
                 let subs = try await downloadTrack(t, using: nil)
                 if !subs.isEmpty { return subs }
             }
@@ -279,7 +279,7 @@ enum SubtitleExtractor {
                    !viaPage.isEmpty {
                     body = viaPage
                 } else {
-                    body = try await fetchBodyViaURLSession(urlString)
+                    body = try await fetchBodyViaURLSessionWithRetry(urlString)
                 }
                 let parsed = parseCaptionBody(body)
                 if !parsed.isEmpty { return parsed }
@@ -291,31 +291,95 @@ enum SubtitleExtractor {
         return []
     }
 
-    /// InnerTube ANDROID_VR player — currently returns caption URLs that do not require PoToken.
-    static func fetchTracksViaAndroidVR(videoID: String) async throws -> [CaptionTrack] {
+    /// Wraps `fetchBodyViaURLSession` with up to `maxRetries` attempts and exponential backoff,
+    /// recovering from transient network errors (timeouts, connection resets, etc.).
+    private static func fetchBodyViaURLSessionWithRetry(_ urlString: String, maxRetries: Int = 3) async throws -> String {
+        var lastError: Error?
+        for attempt in 0..<maxRetries {
+            do {
+                return try await fetchBodyViaURLSession(urlString)
+            } catch {
+                lastError = error
+                if attempt < maxRetries - 1 {
+                    // 300 ms, 600 ms, … — only retries on network-layer errors.
+                    let delay = UInt64(300_000_000) * UInt64(1 << attempt)
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+            }
+        }
+        throw lastError!
+    }
+
+    /// InnerTube client configurations that return caption URLs without requiring a PoToken.
+    private enum InnerTubeClient {
+        case androidVR
+        case androidTestsuite
+        case iOS
+
+        var clientName: String {
+            switch self {
+            case .androidVR: return "ANDROID_VR"
+            case .androidTestsuite: return "ANDROID_TESTSUITE"
+            case .iOS: return "IOS"
+            }
+        }
+        var clientVersion: String {
+            switch self {
+            case .androidVR: return "1.60.19"
+            case .androidTestsuite: return "1.9"
+            case .iOS: return "19.45.4"
+            }
+        }
+        var clientNameHeader: String {
+            switch self {
+            case .androidVR: return "28"
+            case .androidTestsuite: return "30"
+            case .iOS: return "5"
+            }
+        }
+        var userAgent: String {
+            switch self {
+            case .androidVR:
+                return "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12) gzip"
+            case .androidTestsuite:
+                return "com.google.android.youtube/1.9 (Linux; U; Android 9) gzip"
+            case .iOS:
+                return "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X)"
+            }
+        }
+        var extraContext: [String: Any] {
+            switch self {
+            case .androidVR:
+                return ["androidSdkVersion": 34, "osName": "Android", "osVersion": "12"]
+            case .androidTestsuite:
+                return ["androidSdkVersion": 28, "osName": "Android", "osVersion": "9"]
+            case .iOS:
+                return ["deviceMake": "Apple", "deviceModel": "iPhone16,2",
+                        "osName": "iPhone", "osVersion": "18.1.0"]
+            }
+        }
+    }
+
+    /// InnerTube `/player` request using the given client — returns caption tracks without requiring PoToken.
+    private static func fetchTracksViaClient(_ client: InnerTubeClient, videoID: String) async throws -> [CaptionTrack] {
         let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12) gzip",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("28", forHTTPHeaderField: "X-Youtube-Client-Name")
-        request.setValue("1.60.19", forHTTPHeaderField: "X-Youtube-Client-Version")
+        request.setValue(client.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(client.clientNameHeader, forHTTPHeaderField: "X-Youtube-Client-Name")
+        request.setValue(client.clientVersion, forHTTPHeaderField: "X-Youtube-Client-Version")
+
+        var clientContext: [String: Any] = [
+            "clientName": client.clientName,
+            "clientVersion": client.clientVersion,
+            "hl": "en",
+            "gl": "US",
+        ]
+        for (k, v) in client.extraContext { clientContext[k] = v }
 
         let body: [String: Any] = [
-            "context": [
-                "client": [
-                    "clientName": "ANDROID_VR",
-                    "clientVersion": "1.60.19",
-                    "hl": "en",
-                    "gl": "US",
-                    "androidSdkVersion": 34,
-                    "osName": "Android",
-                    "osVersion": "12",
-                ]
-            ],
+            "context": ["client": clientContext],
             "videoId": videoID,
             "contentCheckOk": true,
             "racyCheckOk": true,
@@ -334,6 +398,23 @@ enum SubtitleExtractor {
         }
         let trackData = try JSONSerialization.data(withJSONObject: trackObjs)
         return (try? JSONDecoder().decode([CaptionTrack].self, from: trackData)) ?? []
+    }
+
+    /// InnerTube ANDROID_VR player — currently returns caption URLs that do not require PoToken.
+    static func fetchTracksViaAndroidVR(videoID: String) async throws -> [CaptionTrack] {
+        try await fetchTracksViaClient(.androidVR, videoID: videoID)
+    }
+
+    /// Try multiple InnerTube clients in sequence until one returns non-empty tracks.
+    /// Falls back through ANDROID_VR → ANDROID_TESTSUITE → iOS, so that if YouTube
+    /// blocks or changes one client the others take over without user-visible failure.
+    static func fetchTracksWithFallbacks(videoID: String) async throws -> [CaptionTrack] {
+        for client in [InnerTubeClient.androidVR, .androidTestsuite, .iOS] {
+            if let tracks = try? await fetchTracksViaClient(client, videoID: videoID), !tracks.isEmpty {
+                return tracks
+            }
+        }
+        return []
     }
 
     private static func captionURLCandidates(from base: String) -> [String] {
@@ -381,6 +462,9 @@ enum SubtitleExtractor {
         )
         request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
         request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw URLError(.badServerResponse)
